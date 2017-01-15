@@ -12,7 +12,7 @@ from utilities.data_utils import make_batches, transform_target
 
 from neural_networks.perceptrons.slp import SLP, f_step
 from neural_networks.perceptrons.mlp import MLP
-from neural_networks.perceptrons.mlp_textbook import MLP as MLP2
+from neural_networks.perceptrons.naive_mlp import NaiveMLP
 
 trainX_simple_linear = np.asarray([
 	[0.5, 2],
@@ -50,6 +50,21 @@ class TestSLP(unittest.TestCase):
 class TestMLP(unittest.TestCase):
 	"""Test cases for MLPs."""
 
+
+	def test_naive(self):
+		num_features = 2
+
+		hidden_layer_sizes=[5]
+		network = NaiveMLP(num_features, 0.5, False)
+		network.build([5,1])
+
+		network.train(trainX_xor, np.atleast_2d(trainY_xor).T, 10)
+
+		print 'Predicting {0} with target {1}: {2}'.format([1,1], [0], network.predict([1,1]))
+		print 'Predicting {0} with target {1}: {2}'.format([0,1], [1], network.predict([0,1]))
+		print 'Predicting {0} with target {1}: {2}'.format([0,0], [0], network.predict([0,0]))
+		print 'Predicting {0} with target {1}: {2}'.format([1,0], [1], network.predict([1,0]))
+
 		
 	def test_simple_mnist(self):
 
@@ -69,7 +84,7 @@ class TestMLP(unittest.TestCase):
 		network = MLP(num_features, hidden_layer_sizes, num_outputs, learning_rate=0.05, learning_rate_decay=1.05)
 
 		network.print_structure()
-		network.train(trainX, trainY, testX=testX_b,testY=testY_b,epochs=50)
+		network.train(trainX, trainY, testX=testX_b, testY=testY_b, epochs=50)
 
 		for i in np.random.choice(np.arange(0, len(testY)), size = (10,)):
 			# classify the digit

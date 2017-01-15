@@ -35,7 +35,7 @@ class SLP():
 		print 'Starting Training of Network'
 
 		for epoch in range(epochs):
-			log_str = '[{0:04}]'.format(epoch)
+			log_str = '[{0:4}]'.format(epoch)
 
 			for batchX, batchY in zip(trainX, trainY):
 				output = self.predict(batchX)

@@ -1,0 +1,5 @@
+*venv
+**pyc
+docs/_build*
+**sublime**
+**log

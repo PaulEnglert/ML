@@ -6,6 +6,7 @@ This repository is an playground to implement any type of machine learning algor
 
 ## Neural Networks
 * restricted boltzmann machine with dynamic numbers of hidden neurons
+* single layer perceptron (binary and multinominal classification)
 
 
 ## Development Notes

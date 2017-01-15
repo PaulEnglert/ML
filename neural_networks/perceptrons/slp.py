@@ -14,7 +14,7 @@ def f_sigmoidal(x):
 
 
 class SLP():
-	'''Single layer perceptron, for binary and multinominal classification.'''
+	'''Single layer perceptron for binary classification.'''
 
 
 

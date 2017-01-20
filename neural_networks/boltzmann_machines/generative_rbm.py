@@ -1,0 +1,70 @@
+# -*- coding: utf-8 -*-
+
+import numpy as np
+
+
+def f_sigmoidal(X, deriv=False):
+	if not deriv:
+		return 1 / ( 1 + np.exp( -1 * X) )
+	else:
+		return f_sigmoidal(X)*(1-f_sigmoidal(X))
+
+"""
+Representation of a restricted boltzmann machine
+"""
+class GenRBM:
+
+	def __init__(self, num_visible_units, num_hidden_units, weights=None):
+		self.W = np.random.randn(num_visible_units+1, num_hidden_units+1)*0.1
+		self.W[:,0] = 0 #bias column
+		self.W[0,:] = 0 #bias row
+		if weights is not None:
+			self.W = weights
+			print 'Using provided weight matrix.'
+		print('Initialized Generative RBM with {0} visible and {1} hidden units.'.format(num_visible_units, num_hidden_units))
+
+	def train(self, trainX, epochs = 500, learning_rate = 0.05):
+		
+		X = np.insert(trainX, 0, 1, axis=1)
+
+		for epoch in range(epochs):
+			log_str = '[{0:4}] '.format(epoch)
+			# positive phase (sample hidden from the visible)
+			P_h = f_sigmoidal(X.dot(self.W))
+			H = P_h > np.random.randn(*P_h.shape)
+			# compute the probability that unit i and j are on together
+			p_plus = X.T.dot(P_h)
+			# negative phase
+			P_v = f_sigmoidal(H.dot(self.W.T))
+			P_v[:,0] = 1
+			# resample hidden from equilibrial visible
+			P_h = f_sigmoidal(P_v.dot(self.W))
+			# compute the probability that unit i and j are on together
+			p_minus = P_v.T.dot(P_h)
+			# update weights
+			self.W += learning_rate * (( p_plus - p_minus )/X.shape[0])
+			# log progress
+			print log_str + ' training error={0}'.format(np.sum((X - P_v) ** 2) / X.shape[0])
+			
+
+	def sample_hidden(self, V):
+		if V.shape[1] == self.W.shape[0]-1:
+			V = np.insert(V, 0, 1, axis=1) # add bias unit, if the input vector is an actual feature vector
+		return f_sigmoidal(np.dot(V, self.W))[:,1:] 
+
+	def dream(self, epochs, x=None):
+		if x is None:
+			x = np.random.randn(self.W.shape[0]) > 0.5
+			x[0] = 1
+		elif x.shape[0] == self.W.shape[0]-1:
+			x = np.insert(x, 0, 1)
+		X = np.zeros((epochs+1, self.W.shape[0]))
+		X[0,:] = x
+		# run alternating gibbs steps
+		for epoch in range(epochs):
+			P_h = f_sigmoidal(X.dot(self.W))
+			P_v = f_sigmoidal((P_h > np.random.randn(*P_h.shape)).dot(self.W.T))
+			P_v[:,0] = 1
+			X[epoch+1, :] = P_v[epoch,:] > np.random.randn(P_v.shape[1]) # set next row of X to output of this gibbs step
+		return X[:,1:]
+

@@ -3,37 +3,73 @@
 import unittest
 import numpy as np
 
-from neural_networks.boltzmann_machines.rbm import RBM
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+from sklearn import datasets
+
+from utilities.data_utils import create_association
+
+from neural_networks.boltzmann_machines.generative_rbm import GenRBM
+
+
+movieDataX = np.asarray([
+	[1,1,1,0,0,0],
+	[1,0,1,0,0,0],
+	[1,1,1,0,0,0],
+	[0,0,1,1,1,0], 
+	[0,0,1,1,0,0],
+	[0,0,1,1,1,0],
+])
+movieDataY = np.asarray([1,1,1,0,0,0])
 
 
 class TestRBM(unittest.TestCase):
 	"""Test cases for RBMs."""
 
-	def test_simple(self):
-		num_inputs = 6
-		num_hidden_units = 2
+	def test_states_simple(self):
+		num_visible = 6
+		num_hidden = 2
 		learning_rate = 0.5
-		trainX = np.asarray([
-			[1,1,1,0,0,0],
-			[1,0,1,0,0,0],
-			[1,1,1,0,0,0],
-			[0,0,1,1,1,0], 
-			[0,0,1,1,0,0],
-			[0,0,1,1,1,0],
-		])
-		trainY = np.asarray([1,1,1,0,0,0])
+		epochs = 10
 
-		network = RBM(num_inputs, num_hidden_units, learning_rate, debug=True)
+		network = GenRBM(num_visible, num_hidden)
+		network.train(movieDataX, epochs=epochs, learning_rate = learning_rate)
 
-		network.train(500, trainX, num_cd_steps=5, no_decay=True)
+		print network.sample_hidden(movieDataX)
 
-		network.label_units(trainX, trainY)
-		network.print_labelling()
+	def test_probs_simple(self):
+		num_visible = 6
+		num_hidden = 2
+		learning_rate = 0.1
+		epochs = 1500
 
-		prediction = network.predict(np.asarray([[0,0,0,1,1,0]]))
-		network.print_prediction(prediction)
+		network = GenRBM(num_visible, num_hidden)
+		network.train(movieDataX, epochs=epochs, learning_rate = learning_rate)
 
-		n = 10
-		dreamed = network.daydream(n)
-		print('\nDaydreaming for '+str(n)+' gibbs steps:')
-		print(dreamed)
+		print np.argmax(network.sample_hidden(movieDataX), axis=1)
+
+		print network.dream(5, x=np.asarray([1,0,1,1,0,1]))
+
+	def test_probs_mnist(self):
+		print "(downloading data...)"
+		dataset = datasets.fetch_mldata("MNIST Original")
+		(trainX, testX, trainY, testY) = train_test_split(
+			dataset.data / 255.0, dataset.target.astype("int0"), test_size = 0.033, train_size=0.067, random_state=42)
+
+		num_visible = trainX.shape[1]
+		num_hidden = np.unique(trainY).shape[0]
+		learning_rate = 0.1
+		epochs = 100
+
+		network = GenRBM(num_visible, num_hidden)
+		network.train(trainX, epochs=epochs, learning_rate=learning_rate)
+
+		associations = create_association(network.sample_hidden(trainX), trainY, probabilities=True)
+		print associations
+
+		for i in np.random.choice(np.arange(0, len(testY)), size = (10,)):
+			# classify the digit
+			pred = network.sample_hidden(np.atleast_2d(testX[i]))
+			#labels = [l[0] for l in associations.items() if l[1] == np.argmax(pred)]
+			# show the image and prediction
+			print "Actual digit is {0}, predicted {1}".format(testY[i], pred)

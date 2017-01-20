@@ -9,6 +9,11 @@ def f_sigmoidal(X, deriv=False):
 	else:
 		return f_sigmoidal(X)*(1-f_sigmoidal(X))
 
+def f_softmax(X):
+	Z = np.sum(np.exp(X), axis=1)
+	Z = Z.reshape(Z.shape[0], 1)
+	return np.exp(X) / Z
+
 """
 Representation of a restricted boltzmann machine
 """
@@ -23,33 +28,39 @@ class GenRBM:
 			print 'Using provided weight matrix.'
 		print('Initialized Generative RBM with {0} visible and {1} hidden units.'.format(num_visible_units, num_hidden_units))
 
-	def train(self, trainX, epochs = 500, learning_rate = 0.05):
-		
-		X = np.insert(trainX, 0, 1, axis=1)
-
+	def train(self, trainX, epochs = 10, learning_rate = 0.05, learning_rate_decay=1, lambda_1=0, lambda_2=0):
 		for epoch in range(epochs):
 			log_str = '[{0:4}] '.format(epoch)
-			# positive phase (sample hidden from the visible)
-			P_h = f_sigmoidal(X.dot(self.W))
-			H = P_h > np.random.randn(*P_h.shape)
-			# compute the probability that unit i and j are on together
-			p_plus = X.T.dot(P_h)
-			# negative phase
-			P_v = f_sigmoidal(H.dot(self.W.T))
-			P_v[:,0] = 1
-			# resample hidden from equilibrial visible
-			P_h = f_sigmoidal(P_v.dot(self.W))
-			# compute the probability that unit i and j are on together
-			p_minus = P_v.T.dot(P_h)
-			# update weights
-			self.W += learning_rate * (( p_plus - p_minus )/X.shape[0])
+			error = 0
+			for batchX in trainX:
+				X = np.insert(batchX, 0, 1, axis=1)
+				# positive phase (sample hidden from the visible)
+				P_h = f_sigmoidal(X.dot(self.W))
+				H = P_h > np.random.randn(*P_h.shape)
+				# compute the probability that unit i and j are on together
+				p_plus = X.T.dot(P_h)
+				# negative phase
+				P_v = f_sigmoidal(H.dot(self.W.T))
+				P_v[:,0] = 1
+				# resample hidden from equilibrial visible
+				P_h = f_sigmoidal(P_v.dot(self.W))
+				# compute the probability that unit i and j are on together
+				p_minus = P_v.T.dot(P_h)
+				# update weights
+				self.W += learning_rate * (( p_plus - p_minus )/X.shape[0])
+				error += np.sum((X - P_v) ** 2) / X.shape[0]
+			# penalize weights
+			self.W -= learning_rate * ( np.sum(np.absolute(self.W))*lambda_1 + np.sum(self.W**2)*lambda_2 ) 
+			# update learning rate
+			learning_rate /= learning_rate_decay
 			# log progress
-			print log_str + ' training error={0}'.format(np.sum((X - P_v) ** 2) / X.shape[0])
-			
+			print log_str + ' training error={0}'.format(error/len(trainX))
 
-	def sample_hidden(self, V):
+	def sample_hidden(self, V, use_softmax=False):
 		if V.shape[1] == self.W.shape[0]-1:
 			V = np.insert(V, 0, 1, axis=1) # add bias unit, if the input vector is an actual feature vector
+		if use_softmax:
+			return f_softmax(np.dot(V, self.W))[:,1:] 
 		return f_sigmoidal(np.dot(V, self.W))[:,1:] 
 
 	def dream(self, epochs, x=None):

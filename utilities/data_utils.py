@@ -44,6 +44,6 @@ def create_association(unit_outputs, labels, probabilities=False):
 			counts[label] = 1
 	for key, value in associations.iteritems():
 		associations[key] = value/counts[key] # average
-		if not probs:
+		if not probabilities:
 			associations[key] = np.argmax(associations[key])
 	return associations

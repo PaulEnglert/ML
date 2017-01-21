@@ -52,7 +52,7 @@ class GenRBM:
 				p_minus = P_v.T.dot(P_h)
 				# update weights
 				self.W += learning_rate * (( p_plus - p_minus )/X.shape[0])
-				error += np.sum((X - P_v) ** 2) / X.shape[0]
+				error += np.sum((X - P_v) ** 2) / X.shape[0] / X.shape[1]
 			# penalize weights
 			self.W -= learning_rate * ( np.sum(np.absolute(self.W))*lambda_1 + np.sum(self.W**2)*lambda_2 ) 
 			# update learning rate
@@ -67,21 +67,21 @@ class GenRBM:
 
 		print 'Best reconstruction error={0} in epoch {1}.'.format(self.e_best, self.Epoch_best)
 
-	def sample_hidden(self, V, use_softmax=False, use_best=True):
+	def sample_hidden(self, V, use_softmax=False, use_best=False):
 		if V.shape[1] == self.W.shape[0]-1:
 			V = np.insert(V, 0, 1, axis=1) # add bias unit, if the input vector is an actual feature vector
 		if use_softmax:
 			return f_softmax(np.dot(V, self.W_best if use_best else self.W))[:,1:] 
 		return f_sigmoidal(np.dot(V, self.W_best if use_best else self.W))[:,1:] 
 
-	def sample_visible(self, H, use_softmax=False, use_best=True):
+	def sample_visible(self, H, use_softmax=False, use_best=False):
 		if H.shape[1] == self.W.shape[1]-1:
 			H = np.insert(H, 0, 1, axis=1) # add bias unit, if the input vector is an actual feature vector
 		if use_softmax:
 			return f_softmax(np.dot(H, self.W_best.T if use_best else self.W.T))[:,1:] 
 		return f_sigmoidal(np.dot(H, self.W_best.T if use_best else self.W.T))[:,1:] 
 
-	def dream(self, epochs, x=None, probabilities=True, use_best=True):
+	def dream(self, epochs, x=None, probabilities=True, use_best=False):
 		if x is None:
 			x = np.random.randn(self.W.shape[0]) > 0.5
 			x[0] = 1

@@ -81,10 +81,10 @@ class TestMLP(unittest.TestCase):
 		num_features = trainX[0].shape[1]
 		num_outputs = 10
 		hidden_layer_sizes=[300]
-		network = MLP(num_features, hidden_layer_sizes, num_outputs, learning_rate=0.05, learning_rate_decay=1.05)
+		network = MLP(num_features, hidden_layer_sizes, num_outputs)
 
 		network.print_structure()
-		network.train(trainX, trainY, testX=testX_b, testY=testY_b, epochs=50)
+		network.train(trainX, trainY, testX=testX_b, testY=testY_b, epochs=50, learning_rate=0.05, learning_rate_decay=1.05)
 
 		for i in np.random.choice(np.arange(0, len(testY)), size = (10,)):
 			# classify the digit

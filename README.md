@@ -9,6 +9,9 @@ This repository is an playground to implement any type of machine learning algor
 * single layer perceptron (binary classification, multinominal classification has to be done with a one vs all strategy)
 * multi layer perceptron (binary and multinominal classification)
 
+## Deep Architectures
+* deep belief network (pretrained rbms stacked into a mlp)
+
 
 ## Development Notes
 * install python requirements in virtualenvironment based on `requirements.txt`.

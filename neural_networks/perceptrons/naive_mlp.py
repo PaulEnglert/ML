@@ -27,56 +27,58 @@ def f_gaussian(value):
 def f_hyperbolic(value):
 		return ( exp( value ) - exp( -1 * value ) ) / ( exp( value ) + exp( -1 * value ) )
 
+class NaiveMLPNeuron:
+	count = 1
+
+	def __init__(self, num_inputs, learning_rate, use_alpha, activation, **kwargs): 
+		self.id = NaiveMLPNeuron.count
+		NaiveMLPNeuron.count = NaiveMLPNeuron.count + 1
+
+		self.learning_rate = learning_rate
+		self.output = None
+		self.wsi = None
+
+		self.input_weights = []
+		for x in xrange(0, num_inputs):
+			self.input_weights.append(random()-0.5)
+		self.theta_weight = random()-0.5
+
+		self.activation = activation
+
+		self.delta = None
+		self.last_input = None
+		self.layer = kwargs.get('layer',0)
+		self.use_alpha = use_alpha
+
+	def compute_wsi(self, input_data, weights = None, theta_weight = None):
+		if weights is None or theta_weight is None:
+			self.wsi = self.theta_weight
+			for index, value in enumerate(input_data):
+				self.wsi = self.wsi + ( value * self.input_weights[index] )
+		else:
+			self.wsi = theta_weight
+			for index, value in enumerate(input_data):
+				self.wsi = self.wsi + ( value * weights[index] )
+
+	def compute_output(self, input_data):
+		self.compute_wsi(input_data)
+		self.output = self.activation(self.wsi)
+		self.last_input = input_data
+
+	def update_weights(self):
+		delta_w = -1*self.learning_rate*self.delta
+		self.theta_weight = self.theta_weight + delta_w*1 + (random() if self.use_alpha else 0)*delta_w*1
+		for index, x in enumerate(self.input_weights):
+			self.input_weights[index] = self.input_weights[index] + (delta_w * self.last_input[index]) + (random() if self.use_alpha else 0)*delta_w*self.last_input[index]
+
+	def update_dr_output_error(self, target):
+		self.delta = (self.output - target) * self.output * (1 - self.output)
+	
+	def update_dr_hidden_error(self, ws_nextlayer):
+		self.delta = (1 - self.output) * self.output * ws_nextlayer
+
+
 class NaiveMLP:
-	class Neuron:
-		count = 1
-
-		def __init__(self, num_inputs, learning_rate, use_alpha, activation, **kwargs): 
-			self.id = NaiveMLP.Neuron.count
-			NaiveMLP.Neuron.count = NaiveMLP.Neuron.count + 1
-
-			self.learning_rate = learning_rate
-			self.output = None
-			self.wsi = None
-
-			self.input_weights = []
-			for x in xrange(0, num_inputs):
-				self.input_weights.append(random()-0.5)
-			self.theta_weight = random()-0.5
-
-			self.activation = activation
-
-			self.delta = None
-			self.last_input = None
-			self.layer = kwargs.get('layer',0)
-			self.use_alpha = use_alpha
-
-		def compute_wsi(self, input_data, weights = None, theta_weight = None):
-			if weights is None or theta_weight is None:
-				self.wsi = self.theta_weight
-				for index, value in enumerate(input_data):
-					self.wsi = self.wsi + ( value * self.input_weights[index] )
-			else:
-				self.wsi = theta_weight
-				for index, value in enumerate(input_data):
-					self.wsi = self.wsi + ( value * weights[index] )
-
-		def compute_output(self, input_data):
-			self.compute_wsi(input_data)
-			self.output = self.activation(self.wsi)
-			self.last_input = input_data
-
-		def update_weights(self):
-			delta_w = -1*self.learning_rate*self.delta
-			self.theta_weight = self.theta_weight + delta_w*1 + (random() if self.use_alpha else 0)*delta_w*1
-			for index, x in enumerate(self.input_weights):
-				self.input_weights[index] = self.input_weights[index] + (delta_w * self.last_input[index]) + (random() if self.use_alpha else 0)*delta_w*self.last_input[index]
-
-		def update_dr_output_error(self, target):
-			self.delta = (self.output - target) * self.output * (1 - self.output)
-		
-		def update_dr_hidden_error(self, ws_nextlayer):
-			self.delta = (1 - self.output) * self.output * ws_nextlayer
 
 	def __init__(self, num_inputs, learning_rate, use_alpha):
 		self.num_inputs = num_inputs
@@ -112,7 +114,7 @@ class NaiveMLP:
 		for l_index, count_in_layer in enumerate(layers):
 			for n in xrange(0, count_in_layer):
 				kwargs['layer'] = l_index
-				n = NaiveMLP.Neuron((self.num_inputs if l_index == 0 else layers[l_index-1]), self.learning_rate, self.use_alpha, f_sigmoidal, **kwargs)
+				n = NaiveMLPNeuron((self.num_inputs if l_index == 0 else layers[l_index-1]), self.learning_rate, self.use_alpha, f_sigmoidal, **kwargs)
 				self.neurons.append(n)
 			print str(l_index)+': '+';'.join([str(n.id)+' (' +str(len(n.input_weights))+')' for n in self.get_layer_neurons(l_index)])
 		print 'Built network with '+str(self.num_layers) + ' layers.'

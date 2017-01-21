@@ -33,38 +33,37 @@ def f_tanh(X, deriv=False):
 		return 1 - f_tanh(X)**2
 
 
+class MLPLayer():
+	count = 0
+	def __init__(self, inputs, units, activation=f_sigmoidal, is_output=False, weights=None):
+		self.id = MLPLayer.count
+		MLPLayer.count += 1
+
+		self.num_inputs = inputs
+		self.num_units = units
+		self.is_output = is_output
+		self.activation = activation
+
+		self.weights = np.random.rand(self.num_inputs, units)*0.1
+		self.weights[-1] = 0
+		if weights is not None:
+			self.weights = weights
+
+	def propagate(self, data):
+		self.activations = np.dot( data, self.weights )
+		self.output = self.activation(self.activations)
+		if not self.is_output:
+			self.derivatives = self.activation(self.activations, deriv=True)
+		return self.output
+
+	def print_structure(self):
+		print '{0} (input {1}, units {2})'.format(self.id, self.num_inputs, self.num_units)
+
+	def print_data(self):
+		print '{0}:\n{1}'.format(self.id, self.weights)
+
 class MLP():
 	'''Multi layer perceptron, for binary and multinominal classification.'''
-
-	count = 0
-	class Layer():
-		def __init__(self, inputs, units, activation=f_sigmoidal, is_output=False, weights=None):
-			self.id = MLP.count
-			MLP.count += 1
-
-			self.num_inputs = inputs
-			self.num_units = units
-			self.is_output = is_output
-			self.activation = activation
-
-			self.weights = np.random.rand(self.num_inputs, units)*0.1
-			self.weights[-1] = 0
-			if weights is not None:
-				self.weights = weights
-
-		def propagate(self, data):
-			self.activations = np.dot( data, self.weights )
-			self.output = self.activation(self.activations)
-			if not self.is_output:
-				self.derivatives = self.activation(self.activations, deriv=True)
-			return self.output
-
-		def print_structure(self):
-			print '{0} (input {1}, units {2})'.format(self.id, self.num_inputs, self.num_units)
-
-		def print_data(self):
-			print '{0}:\n{1}'.format(self.id, self.weights)
-
 	def __init__(self, num_features, hidden_layer_sizes, num_outputs, weights=None):
 		self.num_features = num_features
 		self.num_outputs = num_outputs
@@ -73,10 +72,10 @@ class MLP():
 		if weights is None:
 			weights = [None for i in range(self.num_layers)]
 		self.layers = []
-		self.layers.append(MLP.Layer(num_features+1, hidden_layer_sizes[0], weights=weights[0]))		 									# input layer
+		self.layers.append(MLPLayer(num_features+1, hidden_layer_sizes[0], weights=weights[0]))		 									# input layer
 		for l in range(1,self.num_layers-1):
-			self.layers.append(MLP.Layer(self.layers[-1].num_units+1, hidden_layer_sizes[l],  weights=weights[1]))							# hidden layer
-		self.layers.append(MLP.Layer(self.layers[-1].num_units+1, num_outputs, activation=f_softmax, is_output=True,  weights=weights[-1]))	# output layer
+			self.layers.append(MLPLayer(self.layers[-1].num_units+1, hidden_layer_sizes[l],  weights=weights[1]))							# hidden layer
+		self.layers.append(MLPLayer(self.layers[-1].num_units+1, num_outputs, activation=f_softmax, is_output=True,  weights=weights[-1]))	# output layer
 	
 	def set_weights(self, weights):
 		for idx in range(self.num_layers):

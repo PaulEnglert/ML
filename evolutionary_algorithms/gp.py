@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+import os
+from datetime import datetime
 import numpy as np
 
 
@@ -135,8 +137,8 @@ class Individual:
     def __init__(self, min_depth, max_depth):
         self.id = Individual.count
         Individual.count += 1
-        self.last_semantics = {}
-        self.last_error = {}
+        self.last_semantics = {'train': None, 'test': None}
+        self.last_error = {'train': None, 'test': None}
         # initialize tree (root is always a function)
         self.root = Node(None, function=Node.get_random_F())
         self.grow(self.root, 0, min_depth, max_depth)
@@ -299,6 +301,8 @@ class GP:
     crossover_probability = .8
     apply_depth_limit = True
     depth_limit = 17
+    log_verbose = True
+    log_file_path = 'results'
 
     def __init__(self, num_features, constants, size):
         Node.constants = constants
@@ -335,5 +339,54 @@ class GP:
             self.population = new_population
             self.population.evaluate(X, Y)
 
+            # logging
+            best = self.population.get_best()
             print log_str + ' best training error={0}'.format(
-                self.population.get_best().get_fitness('train'))
+                best.get_fitness('train'))
+            log_str += ' best individual: \n{0}\n'.format(best)
+            if GP.log_verbose:
+                best.calculate_dimensions()
+                self.log_state(g, best, log_str)
+
+    def log_state(self, generation, best, logstr=''):
+        base = os.path.join(os.getcwd(), GP.log_file_path)
+        if not os.path.exists(base):
+            os.makedirs(base)
+        # first time
+        if not hasattr(self, 'rid'):
+            self.rid = str(int(
+                (datetime.now() - datetime(1970, 1, 1)).total_seconds()))
+            with open(os.path.join(
+                    base,
+                    self.rid + '-gp.log'), 'ab') as log:
+                log.write('Standard GP\n')
+            with open(os.path.join(
+                    base,
+                    self.rid + '-trainfitness.txt'), 'ab') as log:
+                log.write('Gen;Train Fitness;Size;Depth\n')
+            with open(os.path.join(
+                    base,
+                    self.rid + '-testfitness.txt'), 'ab') as log:
+                log.write('Gen;Test Fitness\n')
+        # log logstr
+        if logstr != '':
+            with open(os.path.join(
+                    base,
+                    self.rid + '-gp.log'), 'ab') as log:
+                log.write(logstr + '\n')
+        # log train fitness
+        with open(os.path.join(
+                base,
+                self.rid + '-trainfitness.txt'), 'ab') as log:
+            log.write('{0};{1};{2};{3}\n'.format(
+                generation,
+                best.get_fitness('train'),
+                best.size,
+                best.depth))
+        # log test fitness
+        with open(os.path.join(
+                base,
+                self.rid + '-testfitness.txt'), 'ab') as log:
+            log.write('{0};{1}\n'.format(
+                generation,
+                best.get_fitness('test')))

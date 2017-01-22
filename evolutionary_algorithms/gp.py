@@ -144,16 +144,16 @@ class Individual:
         self.grow(self.root, 0, min_depth, max_depth)
         self.calculate_dimensions()
 
-    def compute(self, X, data_type='train'):
+    def compute(self, X, data_type):
         np.seterr(all='ignore')
         self.last_semantics[data_type] = self.root.compute(X)
         np.seterr(all='warn')
         return self.last_semantics[data_type]
 
     def evaluate(self, X, Y, data_type='train'):
-        self.compute(X)
-        self.last_error[data_type] = np.sum(
-            (self.last_semantics[data_type] - Y)**2)
+        self.compute(X, data_type)
+        self.last_error[data_type] = np.sqrt(np.sum(
+            (self.last_semantics[data_type] - Y)**2) / X.shape[0])
         return self.last_error[data_type]
 
     def get_fitness(self, data_type):
@@ -253,9 +253,11 @@ class Population:
     def get_best(self):
         return Population.filter_best(self.individuals)
 
-    def evaluate(self, X, Y):
+    def evaluate(self, X, Y, testX=None, testY=None):
         for i in self.individuals:
             i.evaluate(X, Y, 'train')
+            if testX is not None and testY is not None:
+                i.evaluate(testX, testY, 'test')
 
     @staticmethod
     def filter_best(array):
@@ -299,9 +301,11 @@ class GP:
     reproduction_probability = .1
     mutation_probability = .3
     crossover_probability = .8
+    max_initial_depth = 6
     apply_depth_limit = True
     depth_limit = 17
     log_verbose = True
+    log_stdout = True
     log_file_path = 'results'
 
     def __init__(self, num_features, constants, size):
@@ -310,9 +314,9 @@ class GP:
 
         self.population = Population(size)
         self.population.create_individuals(
-            init_min_depth=1, max_depth=6, init_type=None)
+            init_min_depth=1, max_depth=GP.max_initial_depth, init_type=None)
 
-    def evolve(self, X, Y, generations):
+    def evolve(self, X, Y, testX=None, testY=None, generations=25):
         for g in range(generations):
             log_str = '[{0:4}] '.format(g)
             # evaluate
@@ -337,12 +341,13 @@ class GP:
                 new_population.individuals.append(offspring)  # add
             # update new population
             self.population = new_population
-            self.population.evaluate(X, Y)
+            self.population.evaluate(X, Y, testX, testY)
 
             # logging
             best = self.population.get_best()
-            print log_str + ' best training error={0}'.format(
-                best.get_fitness('train'))
+            if GP.log_stdout:
+                print log_str + ' best training error={0}'.format(
+                    best.get_fitness('train'))
             log_str += ' best individual: \n{0}\n'.format(best)
             if GP.log_verbose:
                 best.calculate_dimensions()

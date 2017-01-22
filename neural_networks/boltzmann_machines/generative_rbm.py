@@ -40,7 +40,7 @@ class GenRBM:
 				X = np.insert(batchX, 0, 1, axis=1)
 				# positive phase (sample hidden from the visible)
 				P_h = f_sigmoidal(X.dot(self.W))
-				H = P_h > np.random.randn(*P_h.shape)
+				H = P_h > np.random.rand(*P_h.shape)
 				# compute the probability that unit i and j are on together
 				p_plus = X.T.dot(P_h)
 				# negative phase
@@ -83,7 +83,7 @@ class GenRBM:
 
 	def dream(self, epochs, x=None, probabilities=True, use_best=False):
 		if x is None:
-			x = np.random.randn(self.W.shape[0]) > 0.5
+			x = np.random.rand(self.W.shape[0]) > 0.5
 			x[0] = 1
 		elif x.shape[0] == self.W.shape[0]-1:
 			x = np.insert(x, 0, 1)
@@ -92,8 +92,8 @@ class GenRBM:
 		# run alternating gibbs steps
 		for epoch in range(epochs):
 			P_h = f_sigmoidal(X.dot(self.W_best if use_best else self.W))
-			P_v = f_sigmoidal((P_h > np.random.randn(*P_h.shape)).dot((self.W_best if use_best else self.W).T))
+			P_v = f_sigmoidal((P_h > np.random.rand(*P_h.shape)).dot((self.W_best if use_best else self.W).T))
 			P_v[:,0] = 1
-			X[epoch+1, :] = P_v[epoch,:] if probabilities else P_v[epoch,:] > np.random.randn(P_v.shape[1]) # set next row of X to output of this gibbs step
+			X[epoch+1, :] = P_v[epoch,:] if probabilities else P_v[epoch,:] > np.random.rand(P_v.shape[1]) # set next row of X to output of this gibbs step
 		return X[:,1:]
 

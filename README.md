@@ -4,13 +4,16 @@ This repository is an playground to implement any type of machine learning algor
 
 **Currently Implemented Algorithms:**
 
+## Evolutionary Algorithms
+* Genetic Programming (Standard Version)
+
 ## Neural Networks
-* restricted boltzmann machine with dynamic numbers of hidden neurons
-* single layer perceptron (binary classification, multinominal classification has to be done with a one vs all strategy)
-* multi layer perceptron (binary and multinominal classification)
+* Restricted Boltzmann Machine with dynamic numbers of hidden neurons
+* Single Layer Perceptron (binary classification, multinominal classification has to be done with a one vs all strategy)
+* Multi Layer Perceptron (binary and multinominal classification)
 
 ## Deep Architectures
-* deep belief network (pretrained rbms stacked into a mlp)
+* Deep Belief Network (pretrained rbms stacked into a mlp)
 
 
 ## Development Notes

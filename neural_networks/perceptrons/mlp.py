@@ -36,6 +36,17 @@ def f_tanh(X, deriv=False):
         return 1 - f_tanh(X)**2
 
 
+def f_softplus(X, deriv=False):  # relu
+    if not deriv:
+        return np.log(1 + np.exp(X))
+    else:
+        return f_sigmoidal(X)
+
+
+def f_pass_through(X, deriv=False):
+    return X
+
+
 class MLPLayer():
     count = 0
 
@@ -72,24 +83,30 @@ class MLPLayer():
 
 class MLP():
     '''Multi layer perceptron, for binary and multinominal classification.'''
+    silent = False
+
     def __init__(
-            self, num_features, hidden_layer_sizes, num_outputs, weights=None):
+            self, num_features, hidden_layer_sizes, num_outputs, weights=None,
+            activations=None):
         self.num_features = num_features
         self.num_outputs = num_outputs
         self.num_layers = len(hidden_layer_sizes) + 1
-
+        if activations is None:
+            activations = [f_sigmoidal for n in range(self.num_layers)]
+            activations[-1] = f_softmax
         if weights is None:
             weights = [None for i in range(self.num_layers)]
         self.layers = []
         self.layers.append(MLPLayer(
-            num_features + 1, hidden_layer_sizes[0], weights=weights[0]))
+            num_features + 1, hidden_layer_sizes[0], weights=weights[0],
+            activation=activations[0]))
         for l in range(1, self.num_layers - 1):
             self.layers.append(MLPLayer(
                 self.layers[-1].num_units + 1, hidden_layer_sizes[l],
-                weights=weights[1]))
+                weights=weights[1], activation=activations[l]))
         self.layers.append(MLPLayer(
-            self.layers[-1].num_units + 1, num_outputs, activation=f_softmax,
-            is_output=True, weights=weights[-1]))
+            self.layers[-1].num_units + 1, num_outputs, is_output=True,
+            weights=weights[-1], activation=activations[-1]))
 
     def set_weights(self, weights):
         for idx in range(self.num_layers):
@@ -124,7 +141,8 @@ class MLP():
                 log_str += ', test_error={0}'.format(
                     np.sum(error) / len(testX))
 
-            print log_str
+            if not MLP.silent:
+                print log_str
 
     def __propagate_forward(self, data):
         output = data

@@ -143,10 +143,13 @@ class Node:
 class Individual:
     """Individual in a Genetic Programming Population"""
     count = 0
+    apply_depth_limit = True
+    depth_limit = 17
 
     def __init__(self, min_depth, max_depth):
         self.id = Individual.count
         Individual.count += 1
+        self.changed = True
         self.last_semantics = {'train': None, 'test': None}
         self.last_error = {'train': None, 'test': None}
         # initialize tree (root is always a function)
@@ -155,15 +158,18 @@ class Individual:
         self.calculate_dimensions()
 
     def compute(self, X, data_type):
-        np.seterr(all='ignore')
-        self.last_semantics[data_type] = self.root.compute(X)
-        np.seterr(all='warn')
+        if self.changed:
+            np.seterr(all='ignore')
+            self.last_semantics[data_type] = self.root.compute(X)
+            np.seterr(all='warn')
+            self.changed = False
         return self.last_semantics[data_type]
 
     def evaluate(self, X, Y, data_type='train'):
-        self.compute(X, data_type)
-        self.last_error[data_type] = np.sqrt(np.sum(
-            (self.last_semantics[data_type] - Y)**2) / X.shape[0])
+        if self.changed:
+            self.compute(X, data_type)
+            self.last_error[data_type] = np.sqrt(np.sum(
+                (self.last_semantics[data_type] - Y)**2) / X.shape[0])
         return self.last_error[data_type]
 
     def get_fitness(self, data_type):
@@ -190,6 +196,7 @@ class Individual:
             random_branch.parent = mutation_point.parent
         else:
             copy.root = random_branch  # root has been replaced
+        copy.changed = True
         return copy
 
     def crossover(self, partner):
@@ -204,12 +211,13 @@ class Individual:
             cx_point_2.parent = cx_point_1.parent
         else:
             copy_1.root = cx_point_2
+        copy_1.changed = True
         return copy_1
 
     # UTILITIES for tree management
     def grow(self, parent, cur_depth, min_depth=0, max_depth=None):
         if max_depth is None:
-            max_depth = 950  # TODO make tree traversals iterative
+            max_depth = Individual.depth_limit
         for i in range(parent.function['arity']):
             if cur_depth < min_depth:
                 parent.children.append(Node(parent, Node.get_random_F()))
@@ -342,6 +350,8 @@ class GP:
             init_min_depth=1, max_depth=GP.max_initial_depth, init_type=None)
 
     def evolve(self, X, Y, testX=None, testY=None, generations=25):
+        Individual.depth_limit = GP.depth_limit
+        Individual.apply_depth_limit = GP.apply_depth_limit
         for g in range(generations):
             log_str = '[{0:4}] '.format(g)
             # evaluate

@@ -14,6 +14,8 @@ def protected_division(v1, v2):
 
 class Node:
     """Class to represent a node in the solution tree"""
+    count = 0
+
     # FUNCTION SET
     f_add = {
         'f': lambda X, v1, v2: np.add(v1, v2),
@@ -87,6 +89,8 @@ class Node:
 
     #  Node Initialization
     def __init__(self, parent, function):
+        self.id = Node.count
+        Node.count += 1
         # reference to parent Node
         self.parent = parent
         # references to children depending on functions arity
@@ -149,7 +153,6 @@ class Individual:
     def __init__(self, min_depth, max_depth):
         self.id = Individual.count
         Individual.count += 1
-        self.changed = True
         self.last_semantics = {'train': None, 'test': None}
         self.last_error = {'train': None, 'test': None}
         # initialize tree (root is always a function)
@@ -158,18 +161,15 @@ class Individual:
         self.calculate_dimensions()
 
     def compute(self, X, data_type):
-        if self.changed:
-            np.seterr(all='ignore')
-            self.last_semantics[data_type] = self.root.compute(X)
-            np.seterr(all='warn')
-            self.changed = False
+        np.seterr(all='ignore')
+        self.last_semantics[data_type] = self.root.compute(X)
+        np.seterr(all='warn')
         return self.last_semantics[data_type]
 
     def evaluate(self, X, Y, data_type='train'):
-        if self.changed:
-            self.compute(X, data_type)
-            self.last_error[data_type] = np.sqrt(np.sum(
-                (self.last_semantics[data_type] - Y)**2) / X.shape[0])
+        self.compute(X, data_type)
+        self.last_error[data_type] = np.sqrt(np.sum(
+            (self.last_semantics[data_type] - Y)**2) / X.shape[0])
         return self.last_error[data_type]
 
     def get_fitness(self, data_type):
@@ -196,7 +196,6 @@ class Individual:
             random_branch.parent = mutation_point.parent
         else:
             copy.root = random_branch  # root has been replaced
-        copy.changed = True
         return copy
 
     def crossover(self, partner):
@@ -211,7 +210,6 @@ class Individual:
             cx_point_2.parent = cx_point_1.parent
         else:
             copy_1.root = cx_point_2
-        copy_1.changed = True
         return copy_1
 
     # UTILITIES for tree management
@@ -262,7 +260,7 @@ class Population:
 
     def __init__(self, size, selection_type=None):
         if selection_type is None:
-            selection_type = Population.tournament
+            self.selection_type = Population.tournament
         self.size = size
         self.individuals = []
 
@@ -274,22 +272,25 @@ class Population:
             self.size, init_min_depth, max_depth)
 
     def select(self, count=1):
-        return [Population.tournament(self.individuals) for i in range(count)]
+        return [self.selection_type(self.individuals)
+                for i in range(count)]
 
-    def get_best(self):
-        return Population.filter_best(self.individuals)
+    def get_best(self, data_type='train'):
+        return Population.filter_best(self.individuals, data_type)
 
-    def evaluate(self, X, Y, testX=None, testY=None):
+    def evaluate(self, X, Y, valX=None, valY=None, testX=None, testY=None):
         for i in self.individuals:
             i.evaluate(X, Y, 'train')
             if testX is not None and testY is not None:
                 i.evaluate(testX, testY, 'test')
+            if valX is not None and valY is not None:
+                i.evaluate(valX, valY, 'val')
 
     @staticmethod
-    def filter_best(array):
+    def filter_best(array, data_type='train'):
         best = None
         for i in array:
-            if best is None or i.better(best):
+            if best is None or i.better(best, data_type):
                 best = i
         return best
 
@@ -342,6 +343,7 @@ class GP:
     log_file_path = 'results'
 
     def __init__(self, num_features, constants, size):
+        name = "Standard GP"
         Node.constants = constants
         Node.num_features = num_features
 
@@ -349,7 +351,9 @@ class GP:
         self.population.create_individuals(
             init_min_depth=1, max_depth=GP.max_initial_depth, init_type=None)
 
-    def evolve(self, X, Y, testX=None, testY=None, generations=25):
+    def evolve(
+            self, X, Y, valX=None, valY=None,
+            testX=None, testY=None, generations=25):
         Individual.depth_limit = GP.depth_limit
         Individual.apply_depth_limit = GP.apply_depth_limit
         for g in range(generations):
@@ -376,7 +380,7 @@ class GP:
                 new_population.individuals.append(offspring)  # add
             # update new population
             self.population = new_population
-            self.population.evaluate(X, Y, testX, testY)
+            self.population.evaluate(X, Y, valX, valY, testX, testY)
 
             # logging
             best = self.population.get_best()
@@ -399,7 +403,7 @@ class GP:
             with open(os.path.join(
                     base,
                     self.rid + '-gp.log'), 'ab') as log:
-                log.write('Standard GP\n')
+                log.write(self.name + '\n')
             with open(os.path.join(
                     base,
                     self.rid + '-trainfitness.txt'), 'ab') as log:

@@ -15,38 +15,48 @@ def protected_division(v1, v2):
 class Node:
     """Class to represent a node in the solution tree"""
     # FUNCTION SET
-    f_set = [{
+    f_add = {
         'f': lambda X, v1, v2: np.add(v1, v2),
         'str': '+',
-        'arity': 2}, {
+        'arity': 2}
+    f_subtract = {
         'f': lambda X, v1, v2: np.subtract(v1, v2),
         'str': '-',
-        'arity': 2}, {
+        'arity': 2}
+    f_multiply = {
         'f': lambda X, v1, v2: np.multiply(v1, v2),
         'str': '*',
-        'arity': 2}, {
+        'arity': 2}
+    f_divide = {
         'f': lambda X, v1, v2: protected_division(v1, v2),
         'str': '/',
-        'arity': 2}, {
+        'arity': 2}
+    f_sin = {
         'f': lambda X, v1: np.sin(v1),
         'str': 'sin',
-        'arity': 1}, {
+        'arity': 1}
+    f_cos = {
         'f': lambda X, v1: np.cos(v1),
         'str': 'cos',
-        'arity': 1}, {
+        'arity': 1}
+    f_tan = {
         'f': lambda X, v1: np.tan(v1),
         'str': 'tan',
-        'arity': 1}, {
+        'arity': 1}
+    f_exp = {
         'f': lambda X, v1: np.exp(v1),
         'str': 'exp',
-        'arity': 1}, {
+        'arity': 1}
+    f_pow = {
         'f': lambda X, v1, v2: np.power(v1, v2),
         'str': 'pow',
-        'arity': 2},  # {
-        # 'f': lambda X, v1: np.log(v1),
-        # 'str': 'log',
-        # 'arity': 1}
-    ]
+        'arity': 2}
+    f_log = {
+        'f': lambda X, v1: np.log(v1),
+        'str': 'log',
+        'arity': 1}
+
+    f_set = [f_add, f_multiply, f_subtract, f_divide]
     constants = [-10, -5, 5, 10]
     num_features = 0
 
@@ -166,7 +176,13 @@ class Individual:
     def mutate(self):
         copy = self.copy()
         mutation_point = copy.random_node_choice()
-        random_branch = copy.create_random()
+        # get depth of mutation point to prevent 'recursion depth exception'
+        d = 0
+        p = mutation_point.parent
+        while p is not None:
+            d += 1
+            p = p.parent
+        random_branch = copy.create_random(d)
         # copy self and update references at parent and new child
         if mutation_point.parent is not None:
             idx = mutation_point.parent.children.index(mutation_point)
@@ -192,6 +208,8 @@ class Individual:
 
     # UTILITIES for tree management
     def grow(self, parent, cur_depth, min_depth=0, max_depth=None):
+        if max_depth is None:
+            max_depth = 950  # TODO make tree traversals iterative
         for i in range(parent.function['arity']):
             if cur_depth < min_depth:
                 parent.children.append(Node(parent, Node.get_random_F()))
@@ -204,9 +222,9 @@ class Individual:
             # grow new branch
             self.grow(parent.children[i], cur_depth + 1, min_depth, max_depth)
 
-    def create_random(self):
+    def create_random(self, start_depth=0):
         parent = Node(None, Node.get_random_TF())
-        self.grow(parent, 0)
+        self.grow(parent, start_depth)
         return parent
 
     def calculate_dimensions(self, only_depth=False):
@@ -287,6 +305,13 @@ class Population:
         individuals = []
         while len(individuals) < size:
             individuals.append(Individual(min_depth, max_depth))
+        return individuals
+
+    @staticmethod
+    def full(size, min_depth, max_depth, num_features, constants):
+        individuals = []
+        while len(individuals) < size:
+            individuals.append(Individual(max_depth, max_depth))
         return individuals
 
     @staticmethod

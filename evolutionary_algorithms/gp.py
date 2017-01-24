@@ -3,11 +3,12 @@
 import os
 from datetime import datetime
 import numpy as np
+from utilities.util import StopRecursion
 
 
 def protected_division(v1, v2):
     zeros = v2 == 0
-    v1[zeros] = 1
+    # v1[zeros] = 1  # return the v1 at positions where division failed
     v2[zeros] = 1
     return np.divide(v1, v2)
 
@@ -79,7 +80,9 @@ class Node:
             'f': lambda X: X[:, rfidx],  # return random X element
             'str': str('x' + str(rfidx)),
             'arity': 0}]
-        return T[1 if np.random.rand() > 0.5 else 0]
+        threshold = float(len(Node.constants)) /\
+            (len(Node.constants) + Node.num_features)
+        return T[1 if np.random.rand() > threshold else 0]
 
     @staticmethod
     def get_random_TF():
@@ -99,6 +102,28 @@ class Node:
         # or it's a function returning a constant/input value
         self.function = function
 
+    def traverse_and_collect(
+            self, node_dict, X, n_steps, early_exit_depth=None):
+        # collect all information in one pass,
+        # exit early if max depth is reached
+        node_dict[self.id] = self
+        inputs = []
+        size = 1
+        depth = 0
+        # if the traversal already went to deep, exit by Exception
+        if early_exit_depth is not None and n_steps > early_exit_depth:
+            raise StopRecursion()
+        # calculate data for all children
+        for c in self.children:
+            y, s, d = c.traverse_and_collect(
+                node_dict, X, n_steps + 1, early_exit_depth)
+            inputs.append(y)
+            if d > depth:
+                depth = d
+            size += s
+        # pass on the own data
+        return (self.function['f'](X, *inputs), size, depth + 1)
+
     def compute(self, X):
         if self.function['arity'] == 0:
             return self.function['f'](X)
@@ -114,13 +139,14 @@ class Node:
     def calculate_size(self):
         return np.sum([c.calculate_size() for c in self.children]) + 1
 
-    def traverse_and_select(self, n, selected):
+    # select a random node with uniform distribution from the tree
+    def tree_select_uniform_rand(self, n, selected):
         n[0] = n[0] + 1  # workaround to pass int by reference
         if int(np.random.rand() * n[0]) == 0:
             selected = self
         if len(self.children) > 0:
             for child in self.children:
-                selected = child.traverse_and_select(n, selected)
+                selected = child.tree_select_uniform_rand(n, selected)
         return selected
 
     def __str__(self):
@@ -137,10 +163,13 @@ class Node:
                 r += str(self.children[i]) + ','
             return r + ')'
 
-    def copy(self, parent=None):
+    def copy(self, nodes_dict=None, parent=None):
         newself = Node(parent, self.function)
+        if nodes_dict is not None:
+            nodes_dict[newself.id] = newself
         for c in range(newself.function['arity']):
-            newself.children.append(self.children[c].copy(newself))
+            newself.children.append(
+                self.children[c].copy(nodes_dict=nodes_dict, parent=newself))
         return newself
 
 
@@ -157,20 +186,47 @@ class Individual:
         self.last_error = {'train': None, 'test': None}
         # initialize tree (root is always a function)
         self.root = Node(None, function=Node.get_random_F())
-        self.grow(self.root, 0, min_depth, max_depth)
-        self.calculate_dimensions()
+        self.nodes = {self.root.id: self.root}
+        self.grow(self.root, 0, min_depth, max_depth, nodes_dict=self.nodes)
 
     def compute(self, X, data_type):
+        # compute output of input matrix
         np.seterr(all='ignore')
         self.last_semantics[data_type] = self.root.compute(X)
         np.seterr(all='warn')
         return self.last_semantics[data_type]
 
-    def evaluate(self, X, Y, data_type='train'):
-        self.compute(X, data_type)
+    # evaluate individual data set and collect as much information
+    # as possible, including: list of nodes, depth, size and output
+    # catch the early exit Exception of the traversal if max depth is reached
+    def __evaluate(self, X, Y, data_type='train'):
+        self.nodes = {}
+        np.seterr(all='ignore')
+        dl = Individual.depth_limit if Individual.apply_depth_limit else None
+        try:
+            result, self.size, self.depth = self.root.traverse_and_collect(
+                self.nodes, X, 0, dl)
+        except StopRecursion:
+            result = [np.Inf for i in X]
+            self.depth = np.Inf
+            self.size = np.Inf
+        np.seterr(all='warn')
+        self.last_semantics[data_type] = result
         self.last_error[data_type] = np.sqrt(np.sum(
             (self.last_semantics[data_type] - Y)**2) / X.shape[0])
         return self.last_error[data_type]
+
+    # wrapper to evaluate all three data partitions
+    def evaluate(self, X, Y, testX=None, testY=None):
+        # collect as much information as possible here
+        self.__evaluate(X, Y, 'train')
+        if self.depth == np.Inf:
+            return
+        # for these only run the computation
+        if testX is not None and testY is not None:
+            self.compute(testX, 'test')
+            self.last_error['test'] = np.sqrt(np.sum(
+                (self.last_semantics['test'] - testY)**2) / testX.shape[0])
 
     def get_fitness(self, data_type):
         return self.last_error[data_type]
@@ -182,13 +238,8 @@ class Individual:
     def mutate(self):
         copy = self.copy()
         mutation_point = copy.random_node_choice()
-        # get depth of mutation point to prevent 'recursion depth exception'
-        d = 0
-        p = mutation_point.parent
-        while p is not None:
-            d += 1
-            p = p.parent
-        random_branch = copy.create_random(d)
+        random_branch = copy.create_random(
+            start_depth=0, max_depth=GP.mutation_maximum_depth)
         # copy self and update references at parent and new child
         if mutation_point.parent is not None:
             idx = mutation_point.parent.children.index(mutation_point)
@@ -200,59 +251,77 @@ class Individual:
 
     def crossover(self, partner):
         # get cx points and copy to not get tangled up in refs
-        copy_1 = self.copy()
-        cx_point_1 = copy_1.random_node_choice()  # node to replace
-        cx_point_2 = partner.random_node_choice().copy()  # replacement
+        newself = self.copy()
+        oldbranch = newself.random_node_choice()  # node to replace
+        newbranch = partner.random_node_choice().copy()  # replacement
         # update references of offspring
-        if cx_point_1.parent is not None:
-            idx = cx_point_1.parent.children.index(cx_point_1)
-            cx_point_1.parent.children[idx] = cx_point_2
-            cx_point_2.parent = cx_point_1.parent
+        if oldbranch.parent is not None:
+            idx = oldbranch.parent.children.index(oldbranch)
+            oldbranch.parent.children[idx] = newbranch
+            newbranch.parent = oldbranch.parent
         else:
-            copy_1.root = cx_point_2
-        return copy_1
+            newself.root = newbranch
+        return newself
 
     # UTILITIES for tree management
-    def grow(self, parent, cur_depth, min_depth=0, max_depth=None):
+    def grow(
+            self, parent, cur_depth, min_depth=0,
+            max_depth=None, nodes_dict=None):
         if max_depth is None:
-            max_depth = Individual.depth_limit
+            max_depth = 950  # prevent recursion depth exception
         for i in range(parent.function['arity']):
             if cur_depth < min_depth:
-                parent.children.append(Node(parent, Node.get_random_F()))
+                newnode = Node(parent, Node.get_random_F())
             elif max_depth is None or cur_depth < max_depth:
-                parent.children.append(
-                    Node(parent, Node.get_random_TF()))
+                newnode = Node(parent, Node.get_random_TF())
             else:  # force terminal element
-                parent.children.append(
-                    Node(parent, Node.get_random_T()))
+                newnode = Node(parent, Node.get_random_T())
+            parent.children.append(newnode)
+            if nodes_dict is not None:
+                nodes_dict[newnode.id] = newnode
             # grow new branch
-            self.grow(parent.children[i], cur_depth + 1, min_depth, max_depth)
+            self.grow(
+                parent.children[i], cur_depth + 1, min_depth=min_depth,
+                max_depth=max_depth, nodes_dict=nodes_dict)
 
-    def create_random(self, start_depth=0):
+    def create_random(self, start_depth=0, max_depth=None):
         parent = Node(None, Node.get_random_TF())
-        self.grow(parent, start_depth)
+        self.grow(parent, start_depth, max_depth=max_depth)
         return parent
 
-    def calculate_dimensions(self, only_depth=False):
+    def calculate_depth(self):
         self.depth = self.root.calculate_depth()
-        if not only_depth:
-            self.size = self.root.calculate_size()
-        return (self.depth, self.size,)
+        return self.depth
+
+    def calculate_size(self):
+        self.size = self.root.calculate_size()
+        return self.size
 
     def random_node_choice(self):
-        n = [0]  # pass integer by reference
-        return self.root.traverse_and_select(n, None)
+        return self.nodes[np.random.choice(self.nodes.keys())]
+        # n = [0]  # pass integer by reference
+        # return self.root.traverse_and_select(n, None)
 
     def __str__(self):
         return str(self.root)
 
     def copy(self):
         newself = Individual(1, 1)
-        newself.root = self.root.copy()
+        newself.depth = self.depth
+        newself.size = self.size
+        for k in self.last_semantics.keys():
+            if self.last_semantics[k] is not None:
+                newself.last_semantics[k] = np.copy(self.last_semantics[k])
+        for k in self.last_error.keys():
+            if self.last_error[k] is not None:
+                newself.last_error[k] = self.last_error[k]
+        newself.nodes = {}
+        newself.root = self.root.copy(newself.nodes)
+        assert len(newself.nodes) == len(self.nodes)
         return newself
 
     def better(self, other, data_type='train'):  # TODO make this dynamic
-        return self.get_fitness(data_type) <= other.get_fitness(data_type)
+        return self.get_fitness(data_type) < other.get_fitness(data_type)
 
 
 class Population:
@@ -261,6 +330,8 @@ class Population:
     def __init__(self, size, selection_type=None):
         if selection_type is None:
             self.selection_type = Population.tournament
+        else:
+            self.selection_type = selection_type
         self.size = size
         self.individuals = []
 
@@ -278,21 +349,13 @@ class Population:
     def get_best(self, data_type='train'):
         return Population.filter_best(self.individuals, data_type)
 
-    def evaluate(self, X, Y, valX=None, valY=None, testX=None, testY=None):
+    def evaluate(self, X, Y, testX=None, testY=None):
         for i in self.individuals:
-            i.evaluate(X, Y, 'train')
-            if testX is not None and testY is not None:
-                i.evaluate(testX, testY, 'test')
-            if valX is not None and valY is not None:
-                i.evaluate(valX, valY, 'val')
+            i.evaluate(X, Y, testX, testY)
 
     @staticmethod
     def filter_best(array, data_type='train'):
-        best = None
-        for i in array:
-            if best is None or i.better(best, data_type):
-                best = i
-        return best
+        return array[np.argmin([a.get_fitness(data_type) for a in array])]
 
     @staticmethod
     def ramped(size, min_depth, max_depth):
@@ -332,18 +395,19 @@ class Population:
 
 class GP:
     """Standard Genetic Programming using Tree-based Solutions"""
-    reproduction_probability = .1
-    mutation_probability = .3
-    crossover_probability = .8
+    reproduction_probability = .0
+    mutation_probability = .1
+    crossover_probability = .9
     max_initial_depth = 6
     apply_depth_limit = True
     depth_limit = 17
+    mutation_maximum_depth = 6
     log_verbose = True
     log_stdout = True
     log_file_path = 'results'
 
     def __init__(self, num_features, constants, size):
-        name = "Standard GP"
+        self.name = "Standard GP"
         Node.constants = constants
         Node.num_features = num_features
 
@@ -352,44 +416,82 @@ class GP:
             init_min_depth=1, max_depth=GP.max_initial_depth, init_type=None)
 
     def evolve(
-            self, X, Y, valX=None, valY=None,
-            testX=None, testY=None, generations=25):
+            self, X, Y, testX=None, testY=None, generations=25):
         Individual.depth_limit = GP.depth_limit
         Individual.apply_depth_limit = GP.apply_depth_limit
+
+        # evaluate
+        self.population.evaluate(X, Y, testX, testY)
+        best = self.population.get_best()
+
         for g in range(generations):
             log_str = '[{0:4}] '.format(g)
-            # evaluate
-            self.population.evaluate(X, Y)
-
+            # new population
             new_population = Population(self.population.size)
             # elitism
-            new_population.individuals.append(self.population.get_best())
-            # evolve
+            new_population.individuals.append(best)
+            # variation
+            if GP.log_verbose:
+                size_violation_count = 0
+                mutation_count = 0
+                crossover_count = 0
+                size_sum = best.size
+                depth_sum = best.depth
             while len(new_population.individuals) < new_population.size:
+                # select parents
                 p1, p2 = self.population.select(2)
+
+                # determine operator
                 r = np.random.rand()
                 offspring = p1
+                # do crossover
                 if r < GP.crossover_probability:
+                    if GP.log_verbose:
+                        crossover_count += 1
                     offspring = p1.crossover(p2)
-                elif r < (1 - GP.reproduction_probability):
+                    offspring.evaluate(X, Y, testX, testY)
+                # do mutation
+                elif r < GP.crossover_probability + GP.mutation_probability:
+                    if GP.log_verbose:
+                        mutation_count += 1
                     offspring = p1.mutate()
+                    offspring.evaluate(X, Y, testX, testY)
+
+                # check depth
                 if GP.apply_depth_limit:
-                    d, s = offspring.calculate_dimensions(only_depth=True)
-                    if d > GP.depth_limit:
-                        offspring = p1  # overwrite an offspring with parent
-                new_population.individuals.append(offspring)  # add
+                    if offspring.depth > GP.depth_limit:
+                        if GP.log_verbose:
+                            size_violation_count += 1
+                        offspring = p1  # overwrite an offspring with p1
+                if GP.log_verbose:
+                    size_sum += offspring.size
+                if GP.log_verbose:
+                    depth_sum += offspring.depth
+                # add offspring to new population
+                new_population.individuals.append(offspring)
             # update new population
             self.population = new_population
-            self.population.evaluate(X, Y, valX, valY, testX, testY)
 
             # logging
             best = self.population.get_best()
             if GP.log_stdout:
-                print log_str + ' best training error={0}'.format(
+                log_str += ' best training error={0}'.format(
                     best.get_fitness('train'))
-            log_str += ' best individual: \n{0}\n'.format(best)
+                log_str += ' with test error={0}'.format(
+                    best.get_fitness('test'))
+                print log_str
             if GP.log_verbose:
-                best.calculate_dimensions()
+                log_str += ' best individual: \n{0}\n'.format(best)
+                log_str += ' number of size violations: {0}\n'.format(
+                    size_violation_count)
+                log_str += ' number of crossovers: {0}\n'.format(
+                    crossover_count)
+                log_str += ' number of mutations: {0}\n'.format(
+                    mutation_count)
+                log_str += ' avg size: {0}\n'.format(
+                    size_sum / self.population.size)
+                log_str += ' avg depth: {0}\n'.format(
+                    depth_sum / self.population.size)
                 self.log_state(g, best, log_str)
 
     def log_state(self, generation, best, logstr=''):
@@ -406,11 +508,11 @@ class GP:
                 log.write(self.name + '\n')
             with open(os.path.join(
                     base,
-                    self.rid + '-trainfitness.txt'), 'ab') as log:
+                    self.rid + '-fitnesstrain.txt'), 'ab') as log:
                 log.write('Gen;Train Fitness;Size;Depth\n')
             with open(os.path.join(
                     base,
-                    self.rid + '-testfitness.txt'), 'ab') as log:
+                    self.rid + '-fitnesstest.txt'), 'ab') as log:
                 log.write('Gen;Test Fitness\n')
         # log logstr
         if logstr != '':
@@ -421,7 +523,7 @@ class GP:
         # log train fitness
         with open(os.path.join(
                 base,
-                self.rid + '-trainfitness.txt'), 'ab') as log:
+                self.rid + '-fitnesstrain.txt'), 'ab') as log:
             log.write('{0};{1};{2};{3}\n'.format(
                 generation,
                 best.get_fitness('train'),
@@ -430,7 +532,7 @@ class GP:
         # log test fitness
         with open(os.path.join(
                 base,
-                self.rid + '-testfitness.txt'), 'ab') as log:
+                self.rid + '-fitnesstest.txt'), 'ab') as log:
             log.write('{0};{1}\n'.format(
                 generation,
                 best.get_fitness('test')))

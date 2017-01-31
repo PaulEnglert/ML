@@ -5,3 +5,5 @@ docs/_build*
 **sublime**
 **log
 *.p
+**tests/results**
+*tests/data**

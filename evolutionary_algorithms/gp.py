@@ -13,7 +13,7 @@ def protected_division(v1, v2):
     return np.divide(v1, v2)
 
 
-class Node:
+class Node(object):
     """Class to represent a node in the solution tree"""
     count = 0
 
@@ -173,7 +173,7 @@ class Node:
         return newself
 
 
-class Individual:
+class Individual(object):
     """Individual in a Genetic Programming Population"""
     count = 0
     apply_depth_limit = True
@@ -324,7 +324,7 @@ class Individual:
         return self.get_fitness(data_type) < other.get_fitness(data_type)
 
 
-class Population:
+class Population(object):
     tournament_size = 4
 
     def __init__(self, size, selection_type=None):
@@ -393,7 +393,7 @@ class Population:
         return Population.filter_best(participants)
 
 
-class GP:
+class GP(object):
     """Standard Genetic Programming using Tree-based Solutions"""
     reproduction_probability = .0
     mutation_probability = .1

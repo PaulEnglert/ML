@@ -10,6 +10,7 @@ from utilities.util import Capturing, StopRecursion
 
 from . import gp
 from neural_networks.perceptrons.slp import SLP, f_softplus
+from sklearn.linear_model import LinearRegression
 
 
 class Node(gp.Node):
@@ -50,7 +51,7 @@ class Node(gp.Node):
 
 
 class Individual(gp.Individual):
-    """overwrite of standard to use rnngp classes and logic
+    """overwrite of standard to use RGP classes and logic
         the footprint is a vector of the output of all sub-
         programs. The last column is the root nodes prediciton
     """
@@ -131,46 +132,66 @@ class Individual(gp.Individual):
             raw.append(x['Y'])
         raw = np.asarray(raw).T ** 2
         raw = (raw - np.min(raw)) / (np.max(raw) - np.min(raw))
+        # get weighting of features
+        if RGP.sub_prog_classifier == 'nn':
+            weights = Individual.process_by_nn(raw)
+        elif RGP.sub_prog_classifier == 'lr':
+            weights = Individual.process_by_lr(raw)
+        else:
+            raise Exception('Unknown Sub Program Classifier')
+        # determine most important subprogram based on weights
+        if weights.shape[0] == 0:
+            return []
+        result = []
+        for i in weights.argsort()[-num_blames:].tolist():
+            s = self.footprint['train'][i]['sp'].calculate_size()
+            minsize = RGP.gp_config['min_program_size']
+            maxsize = RGP.gp_config['max_program_size']
+            if minsize is not None and minsize < 1:
+                minsize = self.size * minsize
+            if maxsize is not None and maxsize < 1:
+                maxsize = self.size * maxsize
+            # print 'Size of OP:{0}; Min:{1}; Max:{2}'.format(
+            #    s, minsize, maxsize)
+            if (s >= minsize or
+                minsize is None) and \
+                (s <= maxsize or
+                    maxsize is None):
+                result.append(str(self.footprint['train'][i]['sp']))
+        return result
+
+    @staticmethod
+    def process_by_lr(X):
+        reg = LinearRegression(fit_intercept=RGP.lr_config['intercept'])
+        reg.fit(X[:, :-1], X[:, -1])
+        return reg.coef_ ** 2
+
+    @staticmethod
+    def process_by_nn(X):
         slp = SLP(
-            raw.shape[1] - 1,
-            RNNGP.nn_config['num_outputs'],
-            activation=RNNGP.nn_config['activation'])
+            X.shape[1] - 1,
+            RGP.nn_config['num_outputs'],
+            activation=RGP.nn_config['activation'])
         tX = make_batches(
-            raw[:, :-1], RNNGP.nn_config['batch_size'],
+            X[:, :-1], RGP.nn_config['batch_size'],
             keep_last=True)
         tY = make_batches(
-            raw[:, -1], RNNGP.nn_config['batch_size'],
+            X[:, -1], RGP.nn_config['batch_size'],
             keep_last=True)
-        result = []
         try:
             with Capturing() as out:
                 slp.train(
                     tX, tY,
-                    epochs=RNNGP.nn_config['epochs'],
-                    learning_rate=RNNGP.nn_config['learning_rate'],
-                    learning_rate_decay=RNNGP.nn_config['learning_rate_decay'])
+                    epochs=RGP.nn_config['epochs'],
+                    learning_rate=RGP.nn_config['learning_rate'],
+                    learning_rate_decay=RGP.nn_config['learning_rate_decay'])
         except RuntimeError:
             print 'WARNING: Failed training SLP: {0}'.format(
                 out[-1] if len(out) > 0 else 'no-output')
+            return []
         else:
             weights = slp.weights[:-1] ** 2  # ignore bias
-            # determine most important subprogram based on weights
-            for i in weights.T.argsort()[:, -num_blames:][0].tolist():
-                s = self.footprint['train'][i]['sp'].calculate_size()
-                minsize = RNNGP.gp_config['min_program_size']
-                maxsize = RNNGP.gp_config['max_program_size']
-                if minsize is not None and minsize < 1:
-                    minsize = self.size * minsize
-                if maxsize is not None and maxsize < 1:
-                    maxsize = self.size * maxsize
-                # print 'Size of OP:{0}; Min:{1}; Max:{2}'.format(
-                #    s, minsize, maxsize)
-                if (s >= minsize or
-                    minsize is None) and \
-                    (s <= maxsize or
-                        maxsize is None):
-                    result.append(str(self.footprint['train'][i]['sp']))
-        return result
+            return weights.T[0]
 
     def evaluate_subprogram_goodness(self):
         # count the occurences of offending subprograms in self
@@ -270,7 +291,7 @@ class Population(gp.Population):
 
     def apply_for_validation_elite(self, applicant):
         if len(Population.validation_elite) <\
-                RNNGP.gp_config['validation_elite_size']:
+                RGP.gp_config['validation_elite_size']:
             Population.validation_elite.append(applicant)
         else:
             rpl = np.argmax([i.get_fitness('val')
@@ -288,13 +309,13 @@ class Population(gp.Population):
         return Population.filter_penalized_best(self.individuals)
 
     def get_val_elite_fitnesses(self):
-        if RNNGP.gp_config['validation_elite_repr'] == 'median':
+        if RGP.gp_config['validation_elite_repr'] == 'median':
             size = len(Population.validation_elite)
             b = np.argsort([i.get_fitness('val')
                             for i in Population.validation_elite])[size // 2]
             return (Population.validation_elite[b].get_fitness('train'),
                     Population.validation_elite[b].get_fitness('val'))
-        if RNNGP.gp_config['validation_elite_repr'] == 'avg':
+        if RGP.gp_config['validation_elite_repr'] == 'avg':
             ft = np.average([i.get_fitness('train')
                             for i in Population.validation_elite])
             fv = np.average([i.get_fitness('val')
@@ -364,7 +385,7 @@ class Population(gp.Population):
 
     @staticmethod
     def filter_penalized_best(P):
-        trf = RNNGP.gp_config['so_params']['offensiveness_cost']
+        trf = RGP.gp_config['so_params']['offensiveness_cost']
         return P[np.argmin([
             np.abs(trf(i.offensiveness)) + i.get_fitness('train')
             for i in P])]
@@ -378,7 +399,7 @@ class Population(gp.Population):
                 best.append(P[i])
         if len(best) == 1:
             return best[0]
-        cfg = RNNGP.gp_config['mo_params']
+        cfg = RGP.gp_config['mo_params']
         if cfg['equality_escape'] == 'random':
             # return a random member of the best array
             return best[int(np.random.rand() * len(best))]
@@ -419,8 +440,12 @@ class Population(gp.Population):
             p.pop('count', None)
 
 
-class RNNGP(gp.GP):
-    """Hybrid Genetic Programming using NNs to repulse overfitting Solutions"""
+class RGP(gp.GP):
+    """Hybrid Genetic Programming using any ML to repulse overfitting Solutions"""
+
+    # classifier to use when determining importance of sub programs
+    # see their own configuration for further adaptions
+    sub_prog_classifier = 'lr'  # lr: linear regression, nn: neural network
 
     # Configuration regarding the ANN (MLP) that is used for extracting
     # important subprograms
@@ -432,9 +457,13 @@ class RNNGP(gp.GP):
 
         # adapt the following according to needs
         'batch_size': 25,
-        'epochs': 25,
+        'epochs': 50,
         'learning_rate': 0.1,
         'learning_rate_decay': 1.01,
+    }
+
+    lr_config = {
+        'intercept': True,
     }
 
     gp_config = {
@@ -468,7 +497,7 @@ class RNNGP(gp.GP):
             'penalize_offensiveness': True,
             # Transformation applied to the offensiveness before adding
             # to the fitness
-            'offensiveness_cost': lambda o: o * 0.01,
+            'offensiveness_cost': lambda o: o * 1.5,
         },
         # SUBPROGRAMS
         # how many subprograms are allowed to be identified as
@@ -503,7 +532,7 @@ class RNNGP(gp.GP):
     }
 
     def __init__(self, num_features, constants, size):
-        self.name = "RNNGP"
+        self.name = "RGP"
         Node.constants = constants
         gp.Node.constants = constants
         Node.num_features = num_features
@@ -512,22 +541,22 @@ class RNNGP(gp.GP):
         Population.validation_elite = []
         Population.offending_sub_programs = []
 
-        if RNNGP.gp_config['search_operator'] == 'mo':
+        if RGP.gp_config['search_operator'] == 'mo':
             self.sel_type = Population.mo_tournament
         else:
             self.sel_type = Population.so_tournament_penalized
         self.population = Population(
             size, selection_type=self.sel_type)
         self.population.create_individuals(
-            init_min_depth=1, max_depth=RNNGP.max_initial_depth,
+            init_min_depth=1, max_depth=RGP.max_initial_depth,
             init_type=None)
 
         self.prepare_logging()
         self.log_config()
 
     def evolve(self, X, Y, valX, valY, testX=None, testY=None, generations=25):
-        Individual.depth_limit = RNNGP.depth_limit
-        Individual.apply_depth_limit = RNNGP.apply_depth_limit
+        Individual.depth_limit = RGP.depth_limit
+        Individual.apply_depth_limit = RGP.apply_depth_limit
 
         # evaluate on training and validation
         self.population.evaluate(X, Y, valX, valY, testX, testY)
@@ -535,7 +564,7 @@ class RNNGP(gp.GP):
         for g in range(generations):
             log_str = '[{0:4}] '.format(g)
 
-            if RNNGP.log_verbose:
+            if RGP.log_verbose:
                 size_violation_count = 0
                 mutation_count = 0
                 crossover_count = 0
@@ -555,9 +584,9 @@ class RNNGP(gp.GP):
 
             # copy the elite individual over to the next population
             # unless it's forbidden by configuration
-            if not RNNGP.gp_config['prevent_elitism']:
+            if not RGP.gp_config['prevent_elitism']:
                 elitist = self.select_elitist()
-                if RNNGP.log_verbose:
+                if RGP.log_verbose:
                     size_sum = elitist.size
                     depth_sum = elitist.depth
                 new_population.individuals.append(elitist)
@@ -574,27 +603,27 @@ class RNNGP(gp.GP):
                 # first try to copying parent
                 offspring = p1.copy()
                 # do crossover
-                if r < RNNGP.crossover_probability:
-                    if RNNGP.log_verbose:
+                if r < RGP.crossover_probability:
+                    if RGP.log_verbose:
                         crossover_count += 1
                     offspring = p1.crossover(p2)
                     offspring.evaluate(X, Y, valX, valY, testX, testY)
                 # do mutation
-                elif r < RNNGP.crossover_probability +\
-                        RNNGP.mutation_probability:
-                    if RNNGP.log_verbose:
+                elif r < RGP.crossover_probability +\
+                        RGP.mutation_probability:
+                    if RGP.log_verbose:
                         mutation_count += 1
                     offspring = p1.mutate()
                     offspring.evaluate(X, Y, valX, valY, testX, testY)
                 # apply depth limit
-                if RNNGP.apply_depth_limit:
-                    if offspring.depth > RNNGP.depth_limit:
+                if RGP.apply_depth_limit:
+                    if offspring.depth > RGP.depth_limit:
                         size_violation_count += 1
                         offspring = p1.copy()  # overwrite an offspring with p1
 
                 # add individual to new population
                 new_population.individuals.append(offspring)
-                if RNNGP.log_verbose:
+                if RGP.log_verbose:
                     size_sum += offspring.size
                     depth_sum += offspring.depth
 
@@ -605,20 +634,20 @@ class RNNGP(gp.GP):
             best = self.population.get_best('train')
 
             # start testing for overfitting after n generations
-            if g > RNNGP.gp_config['skip_generations']:
+            if g > RGP.gp_config['skip_generations']:
                 # determine if best is overfitting
                 is_overfitting = False
                 f1, f2 = best.get_fitness('train'), best.get_fitness('val')
                 bf1, bf2 = self.population.get_val_elite_fitnesses()
                 if f2 > bf2:  # if best is worse on validation then val elite
-                    best.overfits_by = (RNNGP.gp_config
+                    best.overfits_by = (RGP.gp_config
                                         ['overfit_severity'])(f1, f2, bf1, bf2)
                     is_overfitting = True
 
                 # process new repulser with NN
                 if is_overfitting:
                     blames = best.evaluate_footprint(
-                        RNNGP.gp_config['num_blames_per_individual'])
+                        RGP.gp_config['num_blames_per_individual'])
                     # add new blames to memory
                     Population.offending_sub_programs += [
                         {'str': b, 'severity': best.overfits_by}
@@ -627,7 +656,7 @@ class RNNGP(gp.GP):
                     Population.handle_offending_program_duplicates()
                     # control size
                     Population.handle_offending_program_size(
-                        RNNGP.gp_config['max_offending_progs'])
+                        RGP.gp_config['max_offending_progs'])
 
             # prevent unecessary computation if there are no
             print 'num offending programs {0}'.format(
@@ -638,7 +667,7 @@ class RNNGP(gp.GP):
                 for i in self.population.individuals:
                     i.evaluate_subprogram_goodness()
 
-                if RNNGP.gp_config['search_operator'] == 'mo':
+                if RGP.gp_config['search_operator'] == 'mo':
                     # NSGA II Sort
                     Population.nsga_II_sort(self.population.individuals)
                 else:
@@ -653,7 +682,7 @@ class RNNGP(gp.GP):
                 last=(g == generations - 1))
 
     def select_elitist(self, fronts=None):
-        cfg = RNNGP.gp_config
+        cfg = RGP.gp_config
         # single objective search
         if cfg['search_operator'] == 'so':
             # search for fitness
@@ -684,9 +713,9 @@ class RNNGP(gp.GP):
             best.get_fitness('train'))
         logstr += ' with test error={0}'.format(
             best.get_fitness('test'))
-        if RNNGP.log_stdout:
+        if RGP.log_stdout:
             print logstr
-        if not RNNGP.log_verbose:
+        if not RGP.log_verbose:
             return
 
         logstr += ' best individual: \n{0}\n'.format(best)
@@ -710,7 +739,7 @@ class RNNGP(gp.GP):
             logstr += '\n offending programm list:{0}'.format(
                 Population.offending_sub_programs)
 
-        base = os.path.join(os.getcwd(), RNNGP.log_file_path)
+        base = os.path.join(os.getcwd(), RGP.log_file_path)
         # log logstr
         if logstr != '':
             with open(os.path.join(
@@ -744,19 +773,19 @@ class RNNGP(gp.GP):
                 best.get_fitness('test')))
 
     def log_config(self):
-        if not RNNGP.log_verbose:
+        if not RGP.log_verbose:
             return
-        base = os.path.join(os.getcwd(), RNNGP.log_file_path)
+        base = os.path.join(os.getcwd(), RGP.log_file_path)
         with open(os.path.join(
                 base,
                 self.rid + '-gp.log'), 'ab') as log:
-            log.write('config: \n' + str(RNNGP.gp_config) + '\n')
-            log.write('nn-config: \n' + str(RNNGP.nn_config) + '\n')
+            log.write('config: \n' + str(RGP.gp_config) + '\n')
+            log.write('nn-config: \n' + str(RGP.nn_config) + '\n')
 
     def prepare_logging(self):
-        if not RNNGP.log_verbose:
+        if not RGP.log_verbose:
             return
-        base = os.path.join(os.getcwd(), RNNGP.log_file_path)
+        base = os.path.join(os.getcwd(), RGP.log_file_path)
         if not os.path.exists(base):
             os.makedirs(base)
 

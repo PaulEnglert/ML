@@ -7,8 +7,7 @@ from utilities.util import StopRecursion
 
 
 def protected_division(v1, v2):
-    zeros = v2 == 0
-    # v1[zeros] = 1  # return the v1 at positions where division failed
+    zeros = np.abs(v2) < 0.00000000001
     v2[zeros] = 1
     return np.divide(v1, v2)
 
@@ -82,11 +81,11 @@ class Node(object):
             'arity': 0}]
         threshold = float(len(Node.constants)) /\
             (len(Node.constants) + Node.num_features)
-        return T[1 if np.random.rand() > threshold else 0]
+        return T[0 if np.random.rand() < threshold else 1]
 
     @staticmethod
     def get_random_TF():
-        if np.random.rand() > 0.5:
+        if np.random.rand() < 0.5:
             return Node.get_random_F()
         return Node.get_random_T()
 
@@ -109,7 +108,7 @@ class Node(object):
         node_dict[self.id] = self
         inputs = []
         size = 1
-        depth = 0
+        depth = -1  # otherwise root is not 0 depth
         # if the traversal already went to deep, exit by Exception
         if early_exit_depth is not None and n_steps > early_exit_depth:
             raise StopRecursion()
@@ -134,7 +133,7 @@ class Node(object):
     def calculate_depth(self):
         if len(self.children) > 0:
             return np.max([[c.calculate_depth() for c in self.children]]) + 1
-        return 1
+        return 0
 
     def calculate_size(self):
         return np.sum([c.calculate_size() for c in self.children]) + 1
@@ -184,8 +183,13 @@ class Individual(object):
         Individual.count += 1
         self.last_semantics = {'train': None, 'test': None}
         self.last_error = {'train': None, 'test': None}
-        # initialize tree (root is always a function)
-        self.root = Node(None, function=Node.get_random_F())
+        # initialize tree
+        if max_depth == 0:  # force end of tree at root
+            self.root = Node(None, function=Node.get_random_T())
+        elif min_depth > 0:  # prevent ending of tree at root
+            self.root = Node(None, function=Node.get_random_F())
+        else:  # probabilistic ending of tree at root
+            self.root = Node(None, function=Node.get_random_TF())
         self.nodes = {self.root.id: self.root}
         self.grow(self.root, 0, min_depth, max_depth, nodes_dict=self.nodes)
 
@@ -236,31 +240,40 @@ class Individual(object):
 
     # GENETIC OPERATORS
     def mutate(self):
+        # before_self = str(self)
         copy = self.copy()
         mutation_point = copy.random_node_choice()
+        parent = mutation_point.parent
         random_branch = copy.create_random(
-            start_depth=0, max_depth=GP.mutation_maximum_depth)
+            max_depth=GP.mutation_maximum_depth)
         # copy self and update references at parent and new child
-        if mutation_point.parent is not None:
-            idx = mutation_point.parent.children.index(mutation_point)
-            mutation_point.parent.children[idx] = random_branch
-            random_branch.parent = mutation_point.parent
+        if parent is not None:
+            idx = parent.children.index(mutation_point)
+            parent.children[idx] = random_branch
+            random_branch.parent = parent
         else:
             copy.root = random_branch  # root has been replaced
+
+        # after_self = str(self)
+        # assert after_self == before_self
         return copy
 
     def crossover(self, partner):
         # get cx points and copy to not get tangled up in refs
+        # before_self = str(self)
         newself = self.copy()
         oldbranch = newself.random_node_choice()  # node to replace
+        parent = oldbranch.parent
         newbranch = partner.random_node_choice().copy()  # replacement
         # update references of offspring
-        if oldbranch.parent is not None:
-            idx = oldbranch.parent.children.index(oldbranch)
-            oldbranch.parent.children[idx] = newbranch
-            newbranch.parent = oldbranch.parent
+        if parent is not None:
+            idx = parent.children.index(oldbranch)
+            parent.children[idx] = newbranch
+            newbranch.parent = parent
         else:
             newself.root = newbranch
+        # after_self = str(self)
+        # assert after_self == before_self
         return newself
 
     # UTILITIES for tree management
@@ -276,6 +289,8 @@ class Individual(object):
                 newnode = Node(parent, Node.get_random_TF())
             else:  # force terminal element
                 newnode = Node(parent, Node.get_random_T())
+                if cur_depth == 950:
+                    print "WARNING: Reached Maximum Recursion Limit!"
             parent.children.append(newnode)
             if nodes_dict is not None:
                 nodes_dict[newnode.id] = newnode
@@ -284,9 +299,9 @@ class Individual(object):
                 parent.children[i], cur_depth + 1, min_depth=min_depth,
                 max_depth=max_depth, nodes_dict=nodes_dict)
 
-    def create_random(self, start_depth=0, max_depth=None):
+    def create_random(self, max_depth=None):
         parent = Node(None, Node.get_random_TF())
-        self.grow(parent, start_depth, max_depth=max_depth)
+        self.grow(parent, 0, max_depth=max_depth)
         return parent
 
     def calculate_depth(self):
@@ -299,14 +314,12 @@ class Individual(object):
 
     def random_node_choice(self):
         return self.nodes[np.random.choice(self.nodes.keys())]
-        # n = [0]  # pass integer by reference
-        # return self.root.traverse_and_select(n, None)
 
     def __str__(self):
         return str(self.root)
 
     def copy(self):
-        newself = Individual(1, 1)
+        newself = Individual(0, 0)
         newself.depth = self.depth
         newself.size = self.size
         for k in self.last_semantics.keys():
@@ -320,7 +333,7 @@ class Individual(object):
         assert len(newself.nodes) == len(self.nodes)
         return newself
 
-    def better(self, other, data_type='train'):  # TODO make this dynamic
+    def better(self, other, data_type='train'):
         return self.get_fitness(data_type) < other.get_fitness(data_type)
 
 
@@ -336,13 +349,15 @@ class Population(object):
         self.individuals = []
 
     def create_individuals(
-            self, init_min_depth=1, max_depth=6, init_type=None):
+            self, init_min_depth=0, max_depth=6, init_type=None):
         if init_type is None:
             init_type = Population.ramped
         self.individuals = init_type(
             self.size, init_min_depth, max_depth)
 
     def select(self, count=1):
+        if count == 1:
+            return self.selection_type(self.individuals)
         return [self.selection_type(self.individuals)
                 for i in range(count)]
 
@@ -363,13 +378,19 @@ class Population(object):
         bucket_size = int(size / (1 + max_depth - min_depth))
         for bucket in range(min_depth, max_depth + 1):
             for i in range(bucket_size):
-                if i % 2 == 0:  # force full growth
-                    individuals.append(Individual(bucket, bucket))
-                else:  # allow normal grow
+                if i % 2 == 0:  # allow normal grow
                     individuals.append(Individual(min_depth, bucket))
+                else:  # force full growth
+                    individuals.append(Individual(bucket, bucket))
         # fill up missing, e.g. due to unclean bucketing:
+        full = False
         while len(individuals) < size:
-            individuals.append(Individual(min_depth, max_depth))
+            if not full:
+                individuals.append(Individual(min_depth, max_depth))
+                full = True
+            if full:
+                individuals.append(Individual(max_depth, max_depth))
+                full = False
         return individuals
 
     @staticmethod
@@ -413,7 +434,10 @@ class GP(object):
 
         self.population = Population(size)
         self.population.create_individuals(
-            init_min_depth=1, max_depth=GP.max_initial_depth, init_type=None)
+            init_min_depth=1, max_depth=GP.max_initial_depth)
+
+        self.prepare_logging()
+        self.log_config()
 
     def evolve(
             self, X, Y, testX=None, testY=None, generations=25):
@@ -439,7 +463,7 @@ class GP(object):
                 depth_sum = best.depth
             while len(new_population.individuals) < new_population.size:
                 # select parents
-                p1, p2 = self.population.select(2)
+                p1 = self.population.select()
 
                 # determine operator
                 r = np.random.rand()
@@ -448,7 +472,7 @@ class GP(object):
                 if r < GP.crossover_probability:
                     if GP.log_verbose:
                         crossover_count += 1
-                    offspring = p1.crossover(p2)
+                    offspring = p1.crossover(self.population.select())
                     offspring.evaluate(X, Y, testX, testY)
                 # do mutation
                 elif r < GP.crossover_probability + GP.mutation_probability:
@@ -471,9 +495,9 @@ class GP(object):
                 new_population.individuals.append(offspring)
             # update new population
             self.population = new_population
+            best = self.population.get_best()
 
             # logging
-            best = self.population.get_best()
             if GP.log_stdout:
                 log_str += ' best training error={0}'.format(
                     best.get_fitness('train'))
@@ -496,24 +520,6 @@ class GP(object):
 
     def log_state(self, generation, best, logstr=''):
         base = os.path.join(os.getcwd(), GP.log_file_path)
-        if not os.path.exists(base):
-            os.makedirs(base)
-        # first time
-        if not hasattr(self, 'rid'):
-            self.rid = str(int(
-                (datetime.now() - datetime(1970, 1, 1)).total_seconds()))
-            with open(os.path.join(
-                    base,
-                    self.rid + '-gp.log'), 'ab') as log:
-                log.write(self.name + '\n')
-            with open(os.path.join(
-                    base,
-                    self.rid + '-fitnesstrain.txt'), 'ab') as log:
-                log.write('Gen;Train Fitness;Size;Depth\n')
-            with open(os.path.join(
-                    base,
-                    self.rid + '-fitnesstest.txt'), 'ab') as log:
-                log.write('Gen;Test Fitness\n')
         # log logstr
         if logstr != '':
             with open(os.path.join(
@@ -536,3 +542,52 @@ class GP(object):
             log.write('{0};{1}\n'.format(
                 generation,
                 best.get_fitness('test')))
+
+    def prepare_logging(self):
+        if not GP.log_verbose:
+            return
+        base = os.path.join(os.getcwd(), GP.log_file_path)
+        if not os.path.exists(base):
+            os.makedirs(base)
+
+        self.rid = str(int(
+            (datetime.now() - datetime(1970, 1, 1)).total_seconds()))
+        with open(os.path.join(
+                base,
+                self.rid + '-gp.log'), 'ab') as log:
+            log.write(self.name + '\n')
+        with open(os.path.join(
+                base,
+                self.rid + '-fitnesstrain.txt'), 'ab') as log:
+            log.write('Gen;Train Fitness;Size;Depth\n')
+        with open(os.path.join(
+                base,
+                self.rid + '-fitnesstest.txt'), 'ab') as log:
+            log.write('Gen;Test Fitness\n')
+
+    def log_config(self):
+        data = 'CONFIG\n'
+        data += 'Number of Features=' + str(Node.num_features) + '\n'
+        data += 'Constants=' + str(Node.constants) + '\n'
+        data += 'reproduction_probability=' +\
+                str(GP.reproduction_probability) + '\n'
+        data += 'mutation_probability=' + str(GP.mutation_probability) + '\n'
+        data += 'crossover_probability=' + str(GP.crossover_probability) + '\n'
+        data += 'max_initial_depth=' + str(GP.max_initial_depth) + '\n'
+        data += 'apply_depth_limit=' + str(GP.apply_depth_limit) + '\n'
+        data += 'depth_limit=' + str(GP.depth_limit) + '\n'
+        data += 'mutation_maximum_depth=' +\
+                str(GP.mutation_maximum_depth) + '\n'
+        self.log(data)
+
+    def log(self, line, type='LOG'):
+        base = os.path.join(os.getcwd(), GP.log_file_path)
+        if type == 'LOG':
+            path = os.path.join(base, self.rid + '-gp.log')
+        elif type == 'TRAIN':
+            path = os.path.join(base, self.rid + '-fitnesstrain.txt')
+        elif type == 'TEST':
+            path = os.path.join(base, self.rid + '-fitnesstest.txt')
+        if path is not None:
+            with open(path, 'ab') as log:
+                log.write(line + '\n')

@@ -3,6 +3,7 @@
 import os
 from datetime import datetime
 import re
+import dill
 import numpy as np
 
 from utilities.data_utils import make_batches
@@ -11,7 +12,62 @@ from utilities.util import Capturing, StopRecursion
 from . import gp
 from neural_networks.perceptrons.slp import SLP, f_softplus
 from sklearn.linear_model import LinearRegression
+from scipy.spatial.distance import pdist, squareform
 
+
+# stats methods for matrix similarity:
+# http://math.stackexchange.com/questions/690972/
+#   distance-or-similarity-between-matrices-that-are-not-the-same-size
+def rv_coefficient(X, Y):
+    min_denominator = 0.000000000001
+    X = np.atleast_2d(X)
+    Y = np.atleast_2d(Y)
+    nom = np.trace(X.dot(X.T).dot(Y).dot(Y.T))
+    den = np.sqrt(np.trace(X.dot(X.T))**2 * np.trace(Y.dot(Y.T))**2)
+    return nom / den if den > min_denominator else 1
+
+
+def vec(X):
+    return np.reshape(X.T, (-1, 1))
+
+
+def rv2_coefficient(X, Y):
+    min_denominator = 0.000000000001
+    X = np.atleast_2d(X)
+    Y = np.atleast_2d(Y)
+    # https://academic.oup.com/bioinformatics/article/25/3/401/244239/Matrix-correlations-for-high-dimensional-data-the
+    vecX = vec(X.dot(X.T) - np.diag(X.dot(X.T)))
+    vecY = vec(Y.dot(Y.T) - np.diag(Y.dot(Y.T)))
+    nom = vecX.T.dot(vecY)
+    den = np.sqrt(vecX.T.dot(vecX) * vecY.T.dot(vecY))
+    return np.average(nom / den) if den > min_denominator else 1
+
+
+def distance_correlation(X, Y):
+    min_denominator = 0.000000000001
+    # https://gist.github.com/satra/aa3d19a12b74e9ab7941
+    X = np.atleast_1d(X)
+    Y = np.atleast_1d(Y)
+    if np.prod(X.shape) == len(X):
+        X = X[:, None]
+    if np.prod(Y.shape) == len(Y):
+        Y = Y[:, None]
+    X = np.atleast_2d(X)
+    Y = np.atleast_2d(Y)
+    n = X.shape[0]
+    if Y.shape[0] != X.shape[0]:
+        raise ValueError('Number of samples must match')
+    a = squareform(pdist(X))
+    b = squareform(pdist(Y))
+    A = a - a.mean(axis=0)[None, :] - a.mean(axis=1)[:, None] + a.mean()
+    B = b - b.mean(axis=0)[None, :] - b.mean(axis=1)[:, None] + b.mean()
+
+    dcov2_xy = (A * B).sum() / float(n * n)
+    dcov2_xx = (A * A).sum() / float(n * n)
+    dcov2_yy = (B * B).sum() / float(n * n)
+    nom = np.sqrt(dcov2_xy)
+    den = np.sqrt(np.sqrt(dcov2_xx) * np.sqrt(dcov2_yy))
+    return nom / den if den > min_denominator else 1
 
 class Node(gp.Node):
     """Overwrite standard to save a footprint of calculation"""
@@ -23,7 +79,7 @@ class Node(gp.Node):
         node_dict[self.id] = self
         inputs = []
         size = 1
-        depth = 0
+        depth = -1
         # if the traversal already went to deep, exit by Exception
         if early_exit_depth is not None and n_steps > early_exit_depth:
             raise StopRecursion()
@@ -62,8 +118,13 @@ class Individual(gp.Individual):
         self.footprint = {'train': [], 'val': [], 'test': []}
         self.last_semantics = {'train': None, 'val': None, 'test': None}
         self.last_error = {'train': None, 'val': None, 'test': None}
-        # initialize tree (root is always a function)
-        self.root = Node(None, function=Node.get_random_F())
+        # initialize tree
+        if max_depth == 0:  # force end of tree at root
+            self.root = Node(None, function=Node.get_random_T())
+        elif min_depth > 0:  # prevent ending of tree at root
+            self.root = Node(None, function=Node.get_random_F())
+        else:  # probabilistic ending of tree at root
+            self.root = Node(None, function=Node.get_random_TF())
         self.nodes = {self.root.id: self.root}
         self.grow(self.root, 0, min_depth, max_depth, nodes_dict=self.nodes)
 
@@ -112,6 +173,8 @@ class Individual(gp.Individual):
                 newnode = Node(parent, Node.get_random_TF())
             else:  # force terminal element
                 newnode = Node(parent, Node.get_random_T())
+                if cur_depth == 950:
+                    print "WARNING: Reached Maximum Recursion Limit!"
             parent.children.append(newnode)
             if nodes_dict is not None:
                 nodes_dict[newnode.id] = newnode
@@ -120,33 +183,44 @@ class Individual(gp.Individual):
                 parent.children[i], cur_depth + 1, min_depth=min_depth,
                 max_depth=max_depth, nodes_dict=nodes_dict)
 
-    def evaluate_footprint(self, num_blames):
+    def evaluate_footprint(self):
         """ Train an MLP on the footprint on a program to identify
             important subprograms
         """
-        if num_blames <= 0:
+        if RGP.r_general['blame_full_program']:
             return []
         raw = []  # convert footprint into learnable data
         assert len(self.footprint['train']) > 0
+        if len(self.footprint['train']) == 1:
+            return []
         for x in self.footprint['train']:
             raw.append(x['Y'])
         raw = np.asarray(raw).T ** 2
         raw = (raw - np.min(raw)) / (np.max(raw) - np.min(raw))
         # get weighting of features
-        if RGP.sub_prog_classifier == 'nn':
+        if RGP.r_general['sub_prog_classifier'] == 'nn':
             weights = Individual.process_by_nn(raw)
-        elif RGP.sub_prog_classifier == 'lr':
+        elif RGP.r_general['sub_prog_classifier'] == 'lr':
             weights = Individual.process_by_lr(raw)
         else:
             raise Exception('Unknown Sub Program Classifier')
         # determine most important subprogram based on weights
         if weights.shape[0] == 0:
             return []
+        return weights
+
+    # ############## SYNTACTIC REPULSING DEPENDENCIES ##############
+    def blame_subprogram_syntax(self, weights, num_blames):
+        if RGP.r_general['blame_full_program']:
+            return [str(self)]
+        if len(weights) == 0:
+            return []
+        extracted_positions = weights.argsort()[-num_blames:].tolist()
         result = []
-        for i in weights.argsort()[-num_blames:].tolist():
+        for i in extracted_positions:
             s = self.footprint['train'][i]['sp'].calculate_size()
-            minsize = RGP.gp_config['min_program_size']
-            maxsize = RGP.gp_config['max_program_size']
+            minsize = RGP.r_general['min_program_size']
+            maxsize = RGP.r_general['max_program_size']
             if minsize is not None and minsize < 1:
                 minsize = self.size * minsize
             if maxsize is not None and maxsize < 1:
@@ -193,32 +267,105 @@ class Individual(gp.Individual):
             weights = slp.weights[:-1] ** 2  # ignore bias
             return weights.T[0]
 
-    def evaluate_subprogram_goodness(self):
+    def evaluate_syntactic_goodness(self):
         # count the occurences of offending subprograms in self
         # also calculate the normalized weighted sum of occurrences
         # (weighted by the severity, normalized by number of progs)
         ws = 0
         count = 0
-        for sp in Population.offending_sub_programs:
-            c = len(re.findall(sp['str'], str(self)))
+        for sp in Population.repulsers:
+            try:
+                c = len(re.findall(sp['str'], str(self)))
+            except:
+                c = 100
             count += c
             ws += sp['severity'] * c
-        self.offensiveness = ws / len(Population.offending_sub_programs)
+        self.offensiveness = ws / len(Population.repulsers)
 
+    # ############## SEMANTIC REPULSING DEPENDENCIES ############
+    def blame_subprogram_semantics(self, weights, num_blames):
+        if RGP.r_general['blame_full_program']:
+            r_data = {'train': [], 'val': [], 'test': []}
+            for k in r_data:
+                for x in self.footprint[k]:
+                    r_data[k].append(x['Y'])
+                r_data[k] = np.asarray(r_data[k]).T
+            return [r_data]
+        if len(weights) == 0:
+            return []
+        extracted_positions = weights.argsort()[-num_blames:].tolist()
+        result = []
+        for i in extracted_positions:
+            # ensure size contraints
+            sp = self.footprint['train'][i]['sp']
+            s = sp.calculate_size()
+            minsize = RGP.r_general['min_program_size']
+            maxsize = RGP.r_general['max_program_size']
+            if minsize is not None and minsize <= 1:
+                minsize = self.size * minsize
+            if maxsize is not None and maxsize <= 1:
+                maxsize = self.size * maxsize
+            if (s >= minsize or
+                minsize is None) and \
+                (s <= maxsize or
+                    maxsize is None):
+                # extract subprogram footprint
+                r_data = {'train': [], 'val': [], 'test': []}
+                d_types = []
+                for k in r_data:
+                    if len(self.footprint[k]) > 0:
+                        d_types.append(k)
+                start_i = int(i - s + 1)
+                for p in range(start_i, i + 1):
+                    for k in d_types:
+                        r_data[k].append(self.footprint[k][p]['Y'])
+                for k in r_data:
+                    r_data[k] = np.asarray(r_data[k]).T
+                result.append(r_data)
+        return result
+
+    def evaluate_semantic_goodness(self, data_type='train'):
+        fp = []
+        for x in self.footprint[data_type]:
+            fp.append(x['Y'])
+        fp = np.asarray(fp).T
+        self.offensiveness_l = []  # list of similarities to all repulsers
+        for r in Population.repulsers:
+            if RGP.r_sema['similarity_measure'] == 'RV':
+                # needs to be inversed, since it denotes
+                # similarity not distance
+                self.offensiveness_l.append(1 - np.abs(rv_coefficient(
+                    fp, r['str'][data_type])))
+            elif RGP.r_sema['similarity_measure'] == 'RV2':
+                self.offensiveness_l.append(1 - np.abs(rv2_coefficient(
+                    fp, r['str'][data_type])))
+            elif RGP.r_sema['similarity_measure'] == 'DC':
+                self.offensiveness_l.append(1 - np.abs(distance_correlation(
+                    fp, r['str'][data_type])))
+        # aggregate offensiveness
+        self.offensiveness = np.average(np.abs(self.offensiveness_l))
+        pass
+
+    # ############## GENERAL DEPENDENCIES ##############
     def dominates(self, opponent):
-        # less subprogram offenses and better fitness -> domination
-        if np.abs(self.offensiveness) < np.abs(opponent.offensiveness) and \
-                self.get_fitness('train') < opponent.get_fitness('train'):
+        fit = self.get_fitness('train') < opponent.get_fitness('train')
+        if RGP.repulse_by == 'semantics' and\
+                not RGP.r_sema['mo_search']['aggregated_goodness']:
+            off = np.abs(self.offensiveness_l) < np.abs(opponent.offensiveness)
+            return fit and (np.sum(off) == len(self.offensiveness_l))
+
+        # less offenses and better fitness -> domination
+        if np.abs(self.offensiveness) < np.abs(opponent.offensiveness) and fit:
             return True
         return False
 
-    def create_random(self, start_depth=0, max_depth=None):
+    def create_random(self, max_depth=None):
         parent = Node(None, Node.get_random_TF())
-        self.grow(parent, start_depth, max_depth=max_depth)
+        self.grow(parent, 0, max_depth=max_depth)
         return parent
 
     def copy(self):
-        newself = Individual(1, 1)
+        newself = Individual(0, 0)
         newself.depth = self.depth
         newself.size = self.size
         for k in self.last_semantics.keys():
@@ -238,7 +385,7 @@ class Individual(gp.Individual):
 
 class Population(gp.Population):
     validation_elite = []
-    offending_sub_programs = []
+    repulsers = []
 
     def __init__(self, size, selection_type):
         self.selection_type = selection_type
@@ -246,13 +393,15 @@ class Population(gp.Population):
         self.individuals = []
 
     def create_individuals(
-            self, init_min_depth=1, max_depth=6, init_type=None):
+            self, init_min_depth=0, max_depth=6, init_type=None):
         if init_type is None:
             init_type = Population.ramped
         self.individuals = init_type(
             self.size, init_min_depth, max_depth)
 
     def select(self, count=1):
+        if count == 1:
+            return self.selection_type(self.individuals)
         return [self.selection_type(self.individuals)
                 for i in range(count)]
 
@@ -266,13 +415,19 @@ class Population(gp.Population):
         bucket_size = int(size / (1 + max_depth - min_depth))
         for bucket in range(min_depth, max_depth + 1):
             for i in range(bucket_size):
-                if i % 2 == 0:  # force full growth
-                    individuals.append(Individual(bucket, bucket))
-                else:  # allow normal grow
+                if i % 2 == 0:  # allow normal grow
                     individuals.append(Individual(min_depth, bucket))
+                else:  # force full growth
+                    individuals.append(Individual(bucket, bucket))
         # fill up missing, e.g. due to unclean bucketing:
+        full = False
         while len(individuals) < size:
-            individuals.append(Individual(min_depth, max_depth))
+            if not full:
+                individuals.append(Individual(min_depth, max_depth))
+                full = True
+            if full:
+                individuals.append(Individual(max_depth, max_depth))
+                full = False
         return individuals
 
     @staticmethod
@@ -304,7 +459,7 @@ class Population(gp.Population):
         return Population.get_best_n(self.individuals, count, data_type)
 
     def get_penalized_best(self):
-        if len(self.offending_sub_programs) == 0:
+        if len(self.repulsers) == 0:
             return self.get_best()
         return Population.filter_penalized_best(self.individuals)
 
@@ -364,7 +519,7 @@ class Population(gp.Population):
     @staticmethod
     def mo_tournament(individuals):
         """Select based on rank or random"""
-        if len(Population.offending_sub_programs) == 0:
+        if len(Population.repulsers) == 0:
             return Population.tournament(individuals)
 
         participants = [individuals[int(np.random.rand() * len(individuals))]
@@ -375,7 +530,7 @@ class Population(gp.Population):
     @staticmethod
     def so_tournament_penalized(individuals):
         """Select based on penalized fitness"""
-        if len(Population.offending_sub_programs) == 0:
+        if len(Population.repulsers) == 0:
             return Population.tournament(individuals)
 
         participants = [individuals[int(np.random.rand() * len(individuals))]
@@ -394,8 +549,8 @@ class Population(gp.Population):
     def pareto_best(P):
         rank_sorted = np.argsort([p.rank for p in P]).tolist()
         best = []
-        for i in reversed(rank_sorted):
-            if P[i].rank == P[rank_sorted[-1]].rank:
+        for i in rank_sorted:
+            if P[i].rank == P[rank_sorted[0]].rank:
                 best.append(P[i])
         if len(best) == 1:
             return best[0]
@@ -415,39 +570,131 @@ class Population(gp.Population):
             return best[b]
 
     @staticmethod
-    def handle_offending_program_size(max_size):
-        size = len(Population.offending_sub_programs)
+    def handle_repulser_list_size(max_size):
+        size = len(Population.repulsers)
         if size > max_size:
             keep = np.argsort(
                 [b['severity']
-                    for b in Population.offending_sub_programs]
+                    for b in Population.repulsers]
             )[-max_size:].tolist()
-            Population.offending_sub_programs = [
-                Population.offending_sub_programs[k] for k in keep]
+            Population.repulsers = [
+                Population.repulsers[k] for k in keep]
 
     @staticmethod
-    def handle_offending_program_duplicates():
+    def handle_repulser_duplicates():
         new_list = np.unique([
-            {'str': p['str'], 'severity': 0, 'count': 0}
-            for p in Population.offending_sub_programs])
+            {'cp': str(p['str']), 'str': p['str'], 'severity': 0, 'count': 0}
+            for p in Population.repulsers])
         for p in new_list:
             # get all from current and average the severity
-            for i in Population.offending_sub_programs:
-                if i['str'] == p['str']:
+            for i in Population.repulsers:
+                if str(i['str']) == p['cp']:
                     p['count'] = p['count'] + 1
                     p['severity'] = p['severity'] + i['severity']
             p['severity'] = p['severity'] / p['count']
             p.pop('count', None)
+            p.pop('cp', None)
 
 
 class RGP(gp.GP):
-    """Hybrid Genetic Programming using any ML to repulse overfitting Solutions"""
+    """Hybrid GP using any ML to repulse overfitting Solutions"""
+    debug = False
+    # Technique to use for repulsing individuals
+    repulse_by = 'semantics'  # semantics | syntax
 
-    # classifier to use when determining importance of sub programs
-    # see their own configuration for further adaptions
-    sub_prog_classifier = 'lr'  # lr: linear regression, nn: neural network
+    gp_config = {
+        # GENERAL
+        # number of generations to skip before engaging in the repusler logic
+        'skip_generations': 50,
+        # prevent the use of elitsm, to avoid letting a newly found repulser
+        # survive
+        'prevent_elitism': False,
+        # Search Operators: use 'mo' for applying multiobjective search to
+        # optimize fitness and offensiveness (see 'mo_params') for
+        # additional configuration (this will fallback to standard fitness
+        # search, if no offending programs have been collected yet)
+        # Use 'so' to apply single objective search with the 'so_params'
+        # configuration
+        'search_operator': 'mo',
+        'mo_params': {
+            # use a pareto optimal solution as surviving elite
+            # (if 'prevent_elitism' is True then this will have no effect!)
+            'pareto_elitism': True,
+            # if two individuals are in the same pareto front, how should
+            # they be compared to get a single winner (this affects tournament
+            # and elitism)
+            'equality_escape': 'fitness',  # 'random','offensiveness','fitness'
+        },
+        'so_params': {
+            # The property to which the search should be directed to
+            'search_for': 'fitness',  # 'fitness', 'offensiveness'
+            # Penalize solutions based on their offensiveness, this is
+            # only used if 'search_for' is 'fitness'
+            'penalize_offensiveness': True,
+            # Transformation applied to the offensiveness before adding
+            # to the fitness (for semantic repulers o will be  in [0,1])
+            'offensiveness_cost': lambda o: o * 0.005,
+        },
+        # number of blamed structures to keep over time
+        # if number is exceeded blames with less severity will be purged
+        'max_num_repulser': 50,
+        # OVERFITTING
+        # number of individuals to keep in the best-of list on the
+        # validation data
+        'validation_elite_size': 50,
+        # quantify overfitting of an individual
+        # f1, f2: training & test fitness of individual i
+        # bf1, bf2: of the best found (median/avg of validation elite)
+        # 'overfit_severity': lambda f1, f2, bf1, bf2: (
+        #     (f2 - bf2) ** 2),  # squared difference of val fitness
+        # this is from Vanneschi et al. (Measuring Bloat, Overfitting
+        # and Functional Complexity in Genetic Programming):
+        'overfit_severity': lambda f1, f2, bf1, bf2: (
+            np.abs(f1 - f2) - np.abs(bf1 - bf2)),
+        # determine the representative of the validation elite by avg/median
+        'validation_elite_repr': 'avg'  # 'median' or 'avg'
+    }
 
-    # Configuration regarding the ANN (MLP) that is used for extracting
+    r_general = {
+        # blame full program for overfitting, or evaluate footprint and
+        # determine important subprograms
+        'blame_full_program': False,
+        # how many subprograms are allowed to be identified as
+        # the key programs of a full program
+        'num_blames_per_individual': 5,
+        # size constraints on the blames: after blaming, this means
+        # that even though n subprograms have been identified, any of them
+        # can be rejected based on the size
+        # (set to None if no size constraint should be applied)
+        # (set to float if a fraction of the program size should be used)
+        # (this is used by syntactic and semantic repulsing)
+        'min_program_size': 0.2,
+        'max_program_size': 0.7,
+        # classifier to use when determining importance of sub programs
+        # see their own configuration for further adaptions
+        'sub_prog_classifier': 'lr',  # lr: linear regression, nn: neural ntwrk
+    }
+
+    # configurations for semantic repulsing
+    r_sema = {
+        'mo_search': {
+            # if false uses a dynamic number of objectives in the domination
+            # process, each objective representing a similarity to a repulser
+            # which has to be maximized
+            # all other processes use a aggregated indicator! (E.g. equality
+            # escape in elitism, or penalized 'so' search)
+            'aggregated_goodness': True,
+        },
+        # similarity measure to use when evaluating individuals semantic
+        # goodness
+        'similarity_measure': 'RV'  # RV, RV2 or DC
+    }
+
+    # configuration for syntactic repulsing
+    r_synt = {
+    }
+
+    # Configuration regarding Algorithm that is used for extracting
     # important subprograms
     nn_config = {
         # DON'T CHANGE
@@ -466,71 +713,6 @@ class RGP(gp.GP):
         'intercept': True,
     }
 
-    gp_config = {
-        # GENERAL
-        # number of generations to skip before engaging in the repusler logic
-        'skip_generations': 50,
-        # prevent the use of elitsm, to avoid letting a newly found repulser
-        # survive
-        'prevent_elitism': False,
-        # Search Operators: use 'mo' for applying multiobjective search to
-        # optimize fitness and offensiveness (see 'mo_params') for
-        # additional configuration (this will fallback to standard fitness
-        # search, if no offending programs have been collected yet)
-        # Use 'so' to apply single objective search with the 'so_params'
-        # configuration
-        'search_operator': 'so',
-        'mo_params': {
-            # use a pareto optimal solution as surviving elite
-            # (if 'prevent_elitism' is True then this will have no effect!)
-            'pareto_elitism': True,
-            # if two individuals are in the same pareto front, how should
-            # they be compared to get a single winner (this affects tournament
-            # and elitism)
-            'equality_escape': 'fitness',  # 'random','offensiveness','fitness'
-        },
-        'so_params': {
-            # The property to which the search should be directed to
-            'search_for': 'fitness',  # 'fitness', 'offensiveness'
-            # Penalize solutions based on their offensiveness, this is
-            # only used if 'search_for' is 'fitness'
-            'penalize_offensiveness': True,
-            # Transformation applied to the offensiveness before adding
-            # to the fitness
-            'offensiveness_cost': lambda o: o * 1.5,
-        },
-        # SUBPROGRAMS
-        # how many subprograms are allowed to be identified as
-        # the key programs of a full program
-        'num_blames_per_individual': 5,
-        # size constraints on the blames: after blaming, this means
-        # that even though n subprograms have been identified, any of them
-        # can be rejected based on the size
-        # (set to None if no size constraint should be applied)
-        # (set to float if a fraction of the program size should be used)
-        'min_program_size': 0.2,
-        'max_program_size': 0.3,
-        # number of blamed structures to keep over time
-        # if number is exceeded blames with less severity will be purged
-        'max_offending_progs': 50,
-
-        # OVERFITTING
-        # number of individuals to keep in the best-of list on the
-        # validation data
-        'validation_elite_size': 50,
-        # quantify overfitting of an individual
-        # f1, f2: training & test fitness of individual i
-        # bf1, bf2: of the best found (median/avg of validation elite)
-        # 'overfit_severity': lambda f1, f2, bf1, bf2: (
-        #     (f2 - bf2) ** 2),  # squared difference of val fitness
-        # this is from Vanneschi et al. (Measuring Bloat, Overfitting
-        # and Functional Complexity in Genetic Programming):
-        'overfit_severity': lambda f1, f2, bf1, bf2: (
-            np.abs(f1 - f2) - np.abs(bf1 - bf2)),
-        # determine the representative of the validation elite by avg/median
-        'validation_elite_repr': 'avg'  # 'median' or 'avg'
-    }
-
     def __init__(self, num_features, constants, size):
         self.name = "RGP"
         Node.constants = constants
@@ -539,7 +721,7 @@ class RGP(gp.GP):
         gp.Node.num_features = num_features
 
         Population.validation_elite = []
-        Population.offending_sub_programs = []
+        Population.repulsers = []
 
         if RGP.gp_config['search_operator'] == 'mo':
             self.sel_type = Population.mo_tournament
@@ -596,7 +778,7 @@ class RGP(gp.GP):
                 # select parents
                 # this will if no subprograms have been collected yet,
                 # fall back to standard tournament
-                p1, p2 = self.population.select(2)
+                p1 = self.population.select()
 
                 # determine operators
                 r = np.random.rand()
@@ -606,7 +788,7 @@ class RGP(gp.GP):
                 if r < RGP.crossover_probability:
                     if RGP.log_verbose:
                         crossover_count += 1
-                    offspring = p1.crossover(p2)
+                    offspring = p1.crossover(self.population.select())
                     offspring.evaluate(X, Y, valX, valY, testX, testY)
                 # do mutation
                 elif r < RGP.crossover_probability +\
@@ -636,36 +818,50 @@ class RGP(gp.GP):
             # start testing for overfitting after n generations
             if g > RGP.gp_config['skip_generations']:
                 # determine if best is overfitting
-                is_overfitting = False
                 f1, f2 = best.get_fitness('train'), best.get_fitness('val')
                 bf1, bf2 = self.population.get_val_elite_fitnesses()
                 if f2 > bf2:  # if best is worse on validation then val elite
                     best.overfits_by = (RGP.gp_config
                                         ['overfit_severity'])(f1, f2, bf1, bf2)
-                    is_overfitting = True
 
-                # process new repulser with NN
-                if is_overfitting:
-                    blames = best.evaluate_footprint(
-                        RGP.gp_config['num_blames_per_individual'])
-                    # add new blames to memory
-                    Population.offending_sub_programs += [
+                    self.log_debug('Evaluating best individuals footprint')
+                    evaluation = best.evaluate_footprint()
+                    self.log_debug('Result: {0}'.format(evaluation))
+                    if RGP.repulse_by == 'syntax':
+                        new_reps = best.blame_subprogram_syntax(
+                            evaluation,
+                            RGP.r_general['num_blames_per_individual'])
+                    elif RGP.repulse_by == 'semantics':
+                        new_reps = best.blame_subprogram_semantics(
+                            evaluation,
+                            RGP.r_general['num_blames_per_individual'])
+                    # add new repulsers to memory
+                    Population.repulsers += [
                         {'str': b, 'severity': best.overfits_by}
-                        for b in blames]
+                        for b in new_reps]
+                    self.log_debug(
+                        'Added new repulsers (blame full prog: {0})'.format(
+                            RGP.r_general['blame_full_program']))
                     # control duplicates (average the severity)
-                    Population.handle_offending_program_duplicates()
+                    Population.handle_repulser_duplicates()
                     # control size
-                    Population.handle_offending_program_size(
-                        RGP.gp_config['max_offending_progs'])
+                    Population.handle_repulser_list_size(
+                        RGP.gp_config['max_num_repulser'])
 
             # prevent unecessary computation if there are no
-            print 'num offending programs {0}'.format(
-                len(self.population.offending_sub_programs))
             # subprograms collected yet
-            if len(Population.offending_sub_programs) > 0:
+            print 'num repulsers {0}'.format(
+                len(self.population.repulsers))
+            avg_offensiveness = 0
+            if len(Population.repulsers) > 0:
                 # update individuals offensiveness
                 for i in self.population.individuals:
-                    i.evaluate_subprogram_goodness()
+                    if RGP.repulse_by == 'syntax':
+                        i.evaluate_syntactic_goodness()
+                    elif RGP.repulse_by == 'semantics':
+                        i.evaluate_semantic_goodness()
+                    avg_offensiveness += i.offensiveness
+                avg_offensiveness /= self.population.size
 
                 if RGP.gp_config['search_operator'] == 'mo':
                     # NSGA II Sort
@@ -679,9 +875,9 @@ class RGP(gp.GP):
                 g, best, log_str, size_violation_count=size_violation_count,
                 crossover_count=crossover_count, mutation_count=mutation_count,
                 size_sum=size_sum, depth_sum=depth_sum,
-                last=(g == generations - 1))
+                last=(g == generations - 1), avg_off=avg_offensiveness)
 
-    def select_elitist(self, fronts=None):
+    def select_elitist(self):
         cfg = RGP.gp_config
         # single objective search
         if cfg['search_operator'] == 'so':
@@ -698,7 +894,7 @@ class RGP(gp.GP):
                 raise Exception('search_for {0} not implemented').format(
                     cfg['so_params']['search_for'])
         # multi objective
-        if len(Population.offending_sub_programs) == 0 or not\
+        if len(Population.repulsers) == 0 or not\
                 cfg['mo_params']['pareto_elitism']:
             # fall back to standard if nothing has been collected yet or
             # it's configured
@@ -718,26 +914,28 @@ class RGP(gp.GP):
         if not RGP.log_verbose:
             return
 
-        logstr += ' best individual: \n{0}\n'.format(best)
-        logstr += ' number of size violations: {0}\n'.format(
+        logstr += '\nbest individual: \n{0}\n'.format(best)
+        logstr += 'number of size violations: {0}\n'.format(
             kwargs['size_violation_count'])
-        logstr += ' number of crossovers: {0}\n'.format(
+        logstr += 'number of crossovers: {0}\n'.format(
             kwargs['crossover_count'])
-        logstr += ' number of mutations: {0}\n'.format(
+        logstr += 'number of mutations: {0}\n'.format(
             kwargs['mutation_count'])
-        logstr += ' avg size: {0}\n'.format(
+        logstr += 'avg size: {0}\n'.format(
             kwargs['size_sum'] / self.population.size)
-        logstr += ' avg depth: {0}\n'.format(
+        logstr += 'avg depth: {0}\n'.format(
             kwargs['depth_sum'] / self.population.size)
-        logstr += 'num offending subprograms: {0}\n'.format(
-            len(Population.offending_sub_programs))
+        logstr += 'num repulsers: {0}\n'.format(
+            len(Population.repulsers))
         logstr += 'validation elite representative ' + \
             '(train, val): {0}\n'.format(
                 self.population.get_val_elite_fitnesses())
+        logstr += 'average offensiveness: {0}\n'.format(
+            kwargs['avg_off'])
         logstr += '-------------------------------------------'
         if kwargs['last']:
-            logstr += '\n offending programm list:{0}'.format(
-                Population.offending_sub_programs)
+            logstr += '\n repulser list:{0}'.format(
+                Population.repulsers)
 
         base = os.path.join(os.getcwd(), RGP.log_file_path)
         # log logstr
@@ -756,7 +954,7 @@ class RGP(gp.GP):
                 best.size,
                 best.depth,
                 best.rank if hasattr(best, 'rank') else None,
-                best.offensiveness if hasattr(best, 'rank') else None))
+                best.offensiveness if hasattr(best, 'offensiveness') else None))
         # log val fitness
         with open(os.path.join(
                 base,
@@ -776,11 +974,33 @@ class RGP(gp.GP):
         if not RGP.log_verbose:
             return
         base = os.path.join(os.getcwd(), RGP.log_file_path)
+
+        data = 'CONFIG\n'
+        data += 'reproduction_probability=' +\
+                str(RGP.reproduction_probability) + '\n'
+        data += 'mutation_prob=' + str(RGP.mutation_probability) + '\n'
+        data += 'crossover_prob=' + str(RGP.crossover_probability) + '\n'
+        data += 'max_initial_depth=' + str(RGP.max_initial_depth) + '\n'
+        data += 'apply_depth_limit=' + str(RGP.apply_depth_limit) + '\n'
+        data += 'depth_limit=' + str(RGP.depth_limit) + '\n'
+        data += 'mutation_maximum_depth=' +\
+                str(RGP.mutation_maximum_depth) + '\n'
+
         with open(os.path.join(
                 base,
                 self.rid + '-gp.log'), 'ab') as log:
+            log.write(data)
+            log.write('repulse_by: ' + str(RGP.repulse_by) + '\n')
+            log.write('r_general: ' + str(RGP.r_general) + '\n')
+            log.write('r_synt: ' + str(RGP.r_synt) + '\n')
+            log.write('r_sema: ' + str(RGP.r_sema) + '\n')
             log.write('config: \n' + str(RGP.gp_config) + '\n')
             log.write('nn-config: \n' + str(RGP.nn_config) + '\n')
+            log.write('lr-config: \n' + str(RGP.lr_config) + '\n')
+            log.write('offensiveness_cost function: ' + dill.source.getsource(
+                RGP.gp_config['so_params']['offensiveness_cost']))
+            log.write('overfit_severity (function): ' + dill.source.getsource(
+                RGP.gp_config['overfit_severity']))
 
     def prepare_logging(self):
         if not RGP.log_verbose:
@@ -807,3 +1027,25 @@ class RGP(gp.GP):
                 base,
                 self.rid + '-fitnesstest.txt'), 'ab') as log:
             log.write('Gen;Test Fitness\n')
+
+    def log(self, line, type='LOG'):
+        base = os.path.join(os.getcwd(), RGP.log_file_path)
+        if type == 'LOG':
+            path = os.path.join(base, self.rid + '-gp.log')
+        elif type == 'TRAIN':
+            path = os.path.join(base, self.rid + '-fitnesstrain.txt')
+        elif type == 'VAL':
+            path = os.path.join(base, self.rid + '-fitnessvalidation.txt')
+        elif type == 'TEST':
+            path = os.path.join(base, self.rid + '-fitnesstest.txt')
+        if path is not None:
+            with open(path, 'ab') as log:
+                log.write(line + '\n')
+
+    def log_debug(self, line):
+        if not RGP.debug:
+            return
+        base = os.path.join(os.getcwd(), RGP.log_file_path)
+        path = os.path.join(base, self.rid + '-gp.log')
+        with open(path, 'ab') as log:
+            log.write(line + '\n')

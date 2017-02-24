@@ -30,7 +30,7 @@ class TestRGP(unittest.TestCase):
         population_size = 10
         rgp = RGP(num_features, constants, population_size)
 
-        rgp.evolve(min_X, min_Y, valX=min_X2, valY=min_Y2, generations=50)
+        rgp.evolve(min_X, min_Y, valX=min_X2, valY=min_Y2, generations=1)
 
         cloudpickle.dump(rgp, open('RGP.p', 'wb'))
         rgp = cPickle.load(open('RGP.p', 'rb'))
@@ -57,13 +57,14 @@ class TestRGP(unittest.TestCase):
         RGP.max_initial_depth = 6
         RGP.log_file_path = base + 'results/'
         RGP.log_stdout = True
-        RGP.gp_config['skip_generations'] = 50
+        RGP.debug = True
+        RGP.gp_config['skip_generations'] = 5
         rbp = RGP(num_features, constants, 200)
 
         rbp.evolve(
             train[:, :-1], train[:, -1],
             val[:, :-1], val[:, -1],
             test[:, :-1], test[:, -1],
-            500)
+            100)
 
         cloudpickle.dump(rbp, open('RGPis.p', 'wb'))

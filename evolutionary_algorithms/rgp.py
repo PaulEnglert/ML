@@ -5,6 +5,7 @@ from datetime import datetime
 import re
 import dill
 import numpy as np
+from timeit import default_timer as _t
 
 from utilities.data_utils import make_batches
 from utilities.util import Capturing, StopRecursion
@@ -13,6 +14,30 @@ from . import gp
 from neural_networks.perceptrons.slp import SLP, f_softplus
 from sklearn.linear_model import LinearRegression
 from scipy.spatial.distance import pdist, squareform
+
+import logging as _l
+
+
+_lmain = _l.getLogger('rgp.main')
+_lftest = _l.getLogger('rgp.ftest')
+_lftrain = _l.getLogger('rgp.ftrain')
+_lfval = _l.getLogger('rgp.fval')
+_ltime = _l.getLogger('rgp.time')
+
+
+# %(levelname)s:\t%(message)s
+def setup_logger(logger_name, log_file, format='%(message)s', level=_l.INFO):
+    logger = _l.getLogger(logger_name)
+    formatter = _l.Formatter(format)
+    fileHandler = _l.FileHandler(log_file)
+    fileHandler.setFormatter(formatter)
+    streamHandler = _l.StreamHandler()
+    streamHandler.setFormatter(formatter)
+
+    logger.setLevel(level)
+    logger.addHandler(fileHandler)
+    # l.addHandler(streamHandler)
+    return logger
 
 
 # stats methods for matrix similarity:
@@ -129,6 +154,7 @@ class Individual(gp.Individual):
         self.grow(self.root, 0, min_depth, max_depth, nodes_dict=self.nodes)
 
     def __evaluate(self, X, Y, data_type='train'):
+        start_t = _t()
         self.nodes = {}
         self.footprint[data_type] = []
         np.seterr(all='ignore')
@@ -144,6 +170,7 @@ class Individual(gp.Individual):
         self.last_semantics[data_type] = result
         self.last_error[data_type] = np.sqrt(np.sum(
             (self.last_semantics[data_type] - Y)**2) / X.shape[0])
+        _ltime.debug('4;individual-full-evaluate;{0}'.format(_t() - start_t))
         return self.last_error[data_type]
 
     def evaluate(self, X, Y, valX, valY, testX=None, testY=None):
@@ -187,6 +214,7 @@ class Individual(gp.Individual):
         """ Train an MLP on the footprint on a program to identify
             important subprograms
         """
+        start_t = _t()
         if RGP.r_general['blame_full_program']:
             return []
         raw = []  # convert footprint into learnable data
@@ -205,12 +233,14 @@ class Individual(gp.Individual):
         else:
             raise Exception('Unknown Sub Program Classifier')
         # determine most important subprogram based on weights
+        _ltime.debug('4;evaluate-footprint;{0}'.format(_t() - start_t))
         if weights.shape[0] == 0:
             return []
         return weights
 
     # ############## SYNTACTIC REPULSING DEPENDENCIES ##############
     def blame_subprogram_syntax(self, weights, num_blames):
+        start_t = _t()
         if RGP.r_general['blame_full_program']:
             return [str(self)]
         if len(weights) == 0:
@@ -232,6 +262,7 @@ class Individual(gp.Individual):
                 (s <= maxsize or
                     maxsize is None):
                 result.append(str(self.footprint['train'][i]['sp']))
+        _ltime.debug('4;blame-subprogram-syntax;{0}'.format(_t() - start_t))
         return result
 
     @staticmethod
@@ -271,6 +302,7 @@ class Individual(gp.Individual):
         # count the occurences of offending subprograms in self
         # also calculate the normalized weighted sum of occurrences
         # (weighted by the severity, normalized by number of progs)
+        start_t = _t()
         ws = 0
         count = 0
         for sp in Population.repulsers:
@@ -281,9 +313,11 @@ class Individual(gp.Individual):
             count += c
             ws += sp['severity'] * c
         self.offensiveness = ws / len(Population.repulsers)
+        _ltime.debug('4;evaluate-syntactic-goodness;{0}'.format(_t() - start_t))
 
     # ############## SEMANTIC REPULSING DEPENDENCIES ############
     def blame_subprogram_semantics(self, weights, num_blames):
+        start_t = _t()
         if RGP.r_general['blame_full_program']:
             r_data = {'train': [], 'val': [], 'test': []}
             for k in r_data:
@@ -322,9 +356,11 @@ class Individual(gp.Individual):
                 for k in r_data:
                     r_data[k] = np.asarray(r_data[k]).T
                 result.append(r_data)
+        _ltime.debug('4;blame-subprogram-semantics;{0}'.format(_t() - start_t))
         return result
 
     def evaluate_semantic_goodness(self, data_type='train'):
+        start_t = _t()
         fp = []
         for x in self.footprint[data_type]:
             fp.append(x['Y'])
@@ -344,7 +380,7 @@ class Individual(gp.Individual):
                     fp, r['str'][data_type])))
         # aggregate offensiveness
         self.offensiveness = np.average(np.abs(self.offensiveness_l))
-        pass
+        _ltime.debug('4;evaluate-semantic-goodness;{0}'.format(_t() - start_t))
 
     # ############## GENERAL DEPENDENCIES ##############
     def dominates(self, opponent):
@@ -406,8 +442,10 @@ class Population(gp.Population):
                 for i in range(count)]
 
     def evaluate(self, X, Y, valX, valY, testX=None, testY=None):
+        start_t = _t()
         for i in self.individuals:
             i.evaluate(X, Y, valX, valY, testX, testY)
+        _ltime.debug('3;population-evaluation;{0}'.format(_t() - start_t))
 
     @staticmethod
     def ramped(size, min_depth, max_depth):
@@ -445,6 +483,7 @@ class Population(gp.Population):
         return individuals
 
     def apply_for_validation_elite(self, applicant):
+        start_t = _t()
         if len(Population.validation_elite) <\
                 RGP.gp_config['validation_elite_size']:
             Population.validation_elite.append(applicant)
@@ -454,6 +493,7 @@ class Population(gp.Population):
             if Population.validation_elite[rpl].get_fitness('val') >\
                     applicant.get_fitness('val'):
                 Population.validation_elite[rpl] = applicant
+        _ltime.debug('3;apply-for-validation-elite;{0}'.format(_t() - start_t))
 
     def get_best_n(self, count, data_type='train'):
         return Population.get_best_n(self.individuals, count, data_type)
@@ -485,6 +525,7 @@ class Population(gp.Population):
 
     @staticmethod
     def nsga_II_sort(P):
+        start_t = _t()
         S, n, F = {}, {}, {}
         count = 0
         F[1] = []
@@ -512,8 +553,10 @@ class Population(gp.Population):
                         Q.append(q)
             i = i + 1
             F[i] = Q
-        print 'Number of Fronts: {0}'.format(i - 1)
+        if RGP.log_stdout:
+            print 'Number of Fronts: {0}'.format(i - 1)
         assert count == len(P)  # ensure correctness of nsga-II
+        _ltime.debug('3;nsga-II-sort;{0}'.format(_t() - start_t))
         return F
 
     @staticmethod
@@ -599,6 +642,7 @@ class Population(gp.Population):
 class RGP(gp.GP):
     """Hybrid GP using any ML to repulse overfitting Solutions"""
     debug = False
+    timeit = False
     # Technique to use for repulsing individuals
     repulse_by = 'semantics'  # semantics | syntax
 
@@ -744,6 +788,8 @@ class RGP(gp.GP):
         self.population.evaluate(X, Y, valX, valY, testX, testY)
 
         for g in range(generations):
+            start_g = _t()
+            start_pp = _t()
             log_str = '[{0:4}] '.format(g)
 
             if RGP.log_verbose:
@@ -772,8 +818,10 @@ class RGP(gp.GP):
                     size_sum = elitist.size
                     depth_sum = elitist.depth
                 new_population.individuals.append(elitist)
+            _ltime.debug('1;prepocessing-phase;{0}'.format(_t() - start_pp))
 
             # vary the current population to fill the new population
+            start_vp = _t()
             while len(new_population.individuals) < new_population.size:
                 # select parents
                 # this will if no subprograms have been collected yet,
@@ -809,6 +857,9 @@ class RGP(gp.GP):
                     size_sum += offspring.size
                     depth_sum += offspring.depth
 
+            _ltime.debug('1;variation-phase;{0}'.format(_t() - start_vp))
+            start_pp = _t()
+
             # update to new population (already evaluated)
             self.population = new_population
 
@@ -821,12 +872,13 @@ class RGP(gp.GP):
                 f1, f2 = best.get_fitness('train'), best.get_fitness('val')
                 bf1, bf2 = self.population.get_val_elite_fitnesses()
                 if f2 > bf2:  # if best is worse on validation then val elite
+                    start_oe = _t()
                     best.overfits_by = (RGP.gp_config
                                         ['overfit_severity'])(f1, f2, bf1, bf2)
 
-                    self.log_debug('Evaluating best individuals footprint')
+                    _lmain.debug('Evaluating best individuals footprint')
                     evaluation = best.evaluate_footprint()
-                    self.log_debug('Result: {0}'.format(evaluation))
+                    _lmain.debug('Result: {0}'.format(evaluation))
                     if RGP.repulse_by == 'syntax':
                         new_reps = best.blame_subprogram_syntax(
                             evaluation,
@@ -839,21 +891,27 @@ class RGP(gp.GP):
                     Population.repulsers += [
                         {'str': b, 'severity': best.overfits_by}
                         for b in new_reps]
-                    self.log_debug(
+                    _ltime.debug('2;evaluate-new-repulser;{0}'.format(_t() - start_oe))
+                    _lmain.debug(
                         'Added new repulsers (blame full prog: {0})'.format(
                             RGP.r_general['blame_full_program']))
+
+                    start_lm = _t()
                     # control duplicates (average the severity)
                     Population.handle_repulser_duplicates()
                     # control size
                     Population.handle_repulser_list_size(
                         RGP.gp_config['max_num_repulser'])
+                    _ltime.debug('2;repulser-list-management;{0}'.format(_t() - start_lm))
 
             # prevent unecessary computation if there are no
             # subprograms collected yet
-            print 'num repulsers {0}'.format(
-                len(self.population.repulsers))
+            if RGP.log_stdout:
+                print 'num repulsers {0}'.format(
+                    len(self.population.repulsers))
             avg_offensiveness = 0
             if len(Population.repulsers) > 0:
+                start_ou = _t()
                 # update individuals offensiveness
                 for i in self.population.individuals:
                     if RGP.repulse_by == 'syntax':
@@ -862,6 +920,7 @@ class RGP(gp.GP):
                         i.evaluate_semantic_goodness()
                     avg_offensiveness += i.offensiveness
                 avg_offensiveness /= self.population.size
+                _ltime.debug('2;p-calculate-offensiveness;{0}'.format(_t() - start_ou))
 
                 if RGP.gp_config['search_operator'] == 'mo':
                     # NSGA II Sort
@@ -870,12 +929,16 @@ class RGP(gp.GP):
                     # no post processing needed for 'so' search
                     pass
 
+            _ltime.debug('1;postprocessing-phase;{0}'.format(_t() - start_pp))
+
             # logging
             self.log_state(
                 g, best, log_str, size_violation_count=size_violation_count,
                 crossover_count=crossover_count, mutation_count=mutation_count,
                 size_sum=size_sum, depth_sum=depth_sum,
                 last=(g == generations - 1), avg_off=avg_offensiveness)
+
+            _ltime.debug('0;generation;{0}'.format(_t() - start_g))
 
     def select_elitist(self):
         cfg = RGP.gp_config
@@ -905,147 +968,103 @@ class RGP(gp.GP):
                 self.population.individuals)
 
     def log_state(self, generation, best, logstr='', **kwargs):
+        # generation wrap up:
         logstr += ' best training error={0}'.format(
             best.get_fitness('train'))
         logstr += ' with test error={0}'.format(
             best.get_fitness('test'))
         if RGP.log_stdout:
             print logstr
-        if not RGP.log_verbose:
-            return
 
-        logstr += '\nbest individual: \n{0}\n'.format(best)
-        logstr += 'number of size violations: {0}\n'.format(
-            kwargs['size_violation_count'])
-        logstr += 'number of crossovers: {0}\n'.format(
-            kwargs['crossover_count'])
-        logstr += 'number of mutations: {0}\n'.format(
-            kwargs['mutation_count'])
-        logstr += 'avg size: {0}\n'.format(
-            kwargs['size_sum'] / self.population.size)
-        logstr += 'avg depth: {0}\n'.format(
-            kwargs['depth_sum'] / self.population.size)
-        logstr += 'num repulsers: {0}\n'.format(
-            len(Population.repulsers))
-        logstr += 'validation elite representative ' + \
-            '(train, val): {0}\n'.format(
-                self.population.get_val_elite_fitnesses())
-        logstr += 'average offensiveness: {0}\n'.format(
-            kwargs['avg_off'])
-        logstr += '-------------------------------------------'
+        # log state to file
+        _lmain.info(logstr)
+        _lmain.info('best individual:\n{0}'.format(best))
+        _lmain.info('number of size violations: {0}'.format(
+            kwargs['size_violation_count']))
+        _lmain.info('number of crossovers: {0}'.format(
+            kwargs['crossover_count']))
+        _lmain.info('number of mutations: {0}'.format(
+            kwargs['mutation_count']))
+        _lmain.info('avg size: {0}'.format(
+            kwargs['size_sum'] / self.population.size))
+        _lmain.info('avg depth: {0}'.format(
+            kwargs['depth_sum'] / self.population.size))
+        _lmain.info('num repulsers: {0}'.format(
+            len(Population.repulsers)))
+        _lmain.info('validation elite representative (train, val): {0}'.format(
+            self.population.get_val_elite_fitnesses()))
+        _lmain.info('average offensiveness: {0}'.format(
+            kwargs['avg_off']))
+        _lmain.info('-------------------------------------------')
         if kwargs['last']:
-            logstr += '\n repulser list:{0}'.format(
-                Population.repulsers)
+            _lmain.info('repulser list:\n{0}'.format(
+                Population.repulsers))
 
-        base = os.path.join(os.getcwd(), RGP.log_file_path)
-        # log logstr
-        if logstr != '':
-            with open(os.path.join(
-                    base,
-                    self.rid + '-gp.log'), 'ab') as log:
-                log.write(logstr + '\n')
         # log train fitness
-        with open(os.path.join(
-                base,
-                self.rid + '-fitnesstrain.txt'), 'ab') as log:
-            log.write('{0};{1};{2};{3};{4};{5}\n'.format(
-                generation,
-                best.get_fitness('train'),
-                best.size,
-                best.depth,
-                best.rank if hasattr(best, 'rank') else None,
-                best.offensiveness if hasattr(best, 'offensiveness') else None))
+        _lftrain.info('{0};{1};{2};{3};{4};{5};{6}'.format(
+            generation,
+            best.get_fitness('train'),
+            best.size,
+            best.depth,
+            best.rank if hasattr(best, 'rank') else None,
+            best.offensiveness if hasattr(best, 'offensiveness') else None,
+            len(Population.repulsers)))
         # log val fitness
-        with open(os.path.join(
-                base,
-                self.rid + '-fitnessvalidation.txt'), 'ab') as log:
-            log.write('{0};{1}\n'.format(
-                generation,
-                best.get_fitness('val')))
+        _lfval.info('{0};{1}'.format(
+            generation,
+            best.get_fitness('val')))
         # log test fitness
-        with open(os.path.join(
-                base,
-                self.rid + '-fitnesstest.txt'), 'ab') as log:
-            log.write('{0};{1}\n'.format(
-                generation,
-                best.get_fitness('test')))
+        _lftest.info('{0};{1}'.format(
+            generation,
+            best.get_fitness('test')))
 
     def log_config(self):
-        if not RGP.log_verbose:
-            return
-        base = os.path.join(os.getcwd(), RGP.log_file_path)
+        _lmain.info('-----------------------------')
+        _lmain.info('CONFIGURATION')
+        _lmain.info('reproduction_probability={0}'.format(RGP.reproduction_probability))
+        _lmain.info('mutation_prob={0}'.format(RGP.mutation_probability))
+        _lmain.info('crossover_prob={0}'.format(RGP.crossover_probability))
+        _lmain.info('max_initial_depth={0}'.format(RGP.max_initial_depth))
+        _lmain.info('apply_depth_limit={0}'.format(RGP.apply_depth_limit))
+        _lmain.info('depth_limit={0}'.format(RGP.depth_limit))
+        _lmain.info('mutation_maximum_depth={0}'.format(RGP.mutation_maximum_depth))
 
-        data = 'CONFIG\n'
-        data += 'reproduction_probability=' +\
-                str(RGP.reproduction_probability) + '\n'
-        data += 'mutation_prob=' + str(RGP.mutation_probability) + '\n'
-        data += 'crossover_prob=' + str(RGP.crossover_probability) + '\n'
-        data += 'max_initial_depth=' + str(RGP.max_initial_depth) + '\n'
-        data += 'apply_depth_limit=' + str(RGP.apply_depth_limit) + '\n'
-        data += 'depth_limit=' + str(RGP.depth_limit) + '\n'
-        data += 'mutation_maximum_depth=' +\
-                str(RGP.mutation_maximum_depth) + '\n'
-
-        with open(os.path.join(
-                base,
-                self.rid + '-gp.log'), 'ab') as log:
-            log.write(data)
-            log.write('repulse_by: ' + str(RGP.repulse_by) + '\n')
-            log.write('r_general: ' + str(RGP.r_general) + '\n')
-            log.write('r_synt: ' + str(RGP.r_synt) + '\n')
-            log.write('r_sema: ' + str(RGP.r_sema) + '\n')
-            log.write('config: \n' + str(RGP.gp_config) + '\n')
-            log.write('nn-config: \n' + str(RGP.nn_config) + '\n')
-            log.write('lr-config: \n' + str(RGP.lr_config) + '\n')
-            log.write('offensiveness_cost function: ' + dill.source.getsource(
-                RGP.gp_config['so_params']['offensiveness_cost']))
-            log.write('overfit_severity (function): ' + dill.source.getsource(
-                RGP.gp_config['overfit_severity']))
+        _lmain.info('repulse_by={0}'.format(RGP.repulse_by))
+        _lmain.info('r_general: {0}'.format(RGP.r_general))
+        _lmain.info('r_synt: {0}'.format(RGP.r_synt))
+        _lmain.info('r_sema: {0}'.format(RGP.r_sema))
+        _lmain.info('gp_config: {0}'.format(RGP.gp_config))
+        _lmain.info('nn-config: {0}'.format(RGP.nn_config))
+        _lmain.info('lr-config: {0}'.format(RGP.lr_config))
+        _lmain.info("".join(dill.source.getsource(RGP.gp_config['so_params']['offensiveness_cost']).split()))
+        _lmain.info("".join(dill.source.getsource(RGP.gp_config['overfit_severity']).split()))
+        _lmain.info('-----------------------------')
 
     def prepare_logging(self):
-        if not RGP.log_verbose:
-            return
+        self.rid = str(int(
+            (datetime.now() - datetime(1970, 1, 1)).total_seconds()))
+
         base = os.path.join(os.getcwd(), RGP.log_file_path)
         if not os.path.exists(base):
             os.makedirs(base)
 
-        self.rid = str(int(
-            (datetime.now() - datetime(1970, 1, 1)).total_seconds()))
-        with open(os.path.join(
-                base,
-                self.rid + '-gp.log'), 'ab') as log:
-            log.write(self.name + '\n')
-        with open(os.path.join(
-                base,
-                self.rid + '-fitnesstrain.txt'), 'ab') as log:
-            log.write('Gen;Train Fitness;Size;Depth;Rank;Offensiveness\n')
-        with open(os.path.join(
-                base,
-                self.rid + '-fitnessvalidation.txt'), 'ab') as log:
-            log.write('Gen;Test Fitness\n')
-        with open(os.path.join(
-                base,
-                self.rid + '-fitnesstest.txt'), 'ab') as log:
-            log.write('Gen;Test Fitness\n')
+        # update loggers
+        level = _l.INFO
+        if RGP.debug:
+            level = _l.DEBUG
+        setup_logger(logger_name='rgp.main', log_file=os.path.join(base, self.rid + '-gp.log'),
+                     level=level)
+        setup_logger(logger_name='rgp.time', log_file=os.path.join(base, self.rid + '-time.log'),
+                     level=_l.DEBUG if RGP.timeit else _l.INFO)
+        setup_logger(logger_name='rgp.ftrain', log_file=os.path.join(base, self.rid + '-fitnesstrain.txt'),
+                     level=level)
+        setup_logger(logger_name='rgp.fval', log_file=os.path.join(base, self.rid + '-fitnessvalidation.txt'),
+                     level=level)
+        setup_logger(logger_name='rgp.ftest', log_file=os.path.join(base, self.rid + '-fitnesstest.txt'),
+                     level=level)
 
-    def log(self, line, type='LOG'):
-        base = os.path.join(os.getcwd(), RGP.log_file_path)
-        if type == 'LOG':
-            path = os.path.join(base, self.rid + '-gp.log')
-        elif type == 'TRAIN':
-            path = os.path.join(base, self.rid + '-fitnesstrain.txt')
-        elif type == 'VAL':
-            path = os.path.join(base, self.rid + '-fitnessvalidation.txt')
-        elif type == 'TEST':
-            path = os.path.join(base, self.rid + '-fitnesstest.txt')
-        if path is not None:
-            with open(path, 'ab') as log:
-                log.write(line + '\n')
-
-    def log_debug(self, line):
-        if not RGP.debug:
-            return
-        base = os.path.join(os.getcwd(), RGP.log_file_path)
-        path = os.path.join(base, self.rid + '-gp.log')
-        with open(path, 'ab') as log:
-            log.write(line + '\n')
+        _lmain.info(self.name)
+        _ltime.info(datetime.now())
+        _lftest.info('Gen;Test Fitness')
+        _lfval.info('Gen;Validation Fitness')
+        _lftrain.info('Gen;Train Fitness;Size;Depth;Rank;Offensiveness;Number Repulsers')

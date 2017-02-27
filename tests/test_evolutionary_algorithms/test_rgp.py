@@ -3,7 +3,7 @@
 import cPickle
 # cloud pickle  is necessary for lamda functions
 import cloudpickle
-
+import logging as _l
 import unittest
 import numpy as np
 
@@ -58,13 +58,20 @@ class TestRGP(unittest.TestCase):
         RGP.log_file_path = base + 'results/'
         RGP.log_stdout = True
         RGP.debug = True
+        RGP.timeit = True
         RGP.gp_config['skip_generations'] = 5
-        rbp = RGP(num_features, constants, 200)
+        rgp = RGP(num_features, constants, 200)
 
-        rbp.evolve(
+        _l.getLogger('rgp.main').info("Train_file = {0}".format(
+            base + 'data/istanbul_stock_train1.txt'))
+        _l.getLogger('rgp.main').info("Test_file = {0}".format(
+            base + 'data/istanbul_stock_test1.txt'))
+        _l.getLogger('rgp.main').info("-------------------------")
+
+        rgp.evolve(
             train[:, :-1], train[:, -1],
             val[:, :-1], val[:, -1],
             test[:, :-1], test[:, -1],
             100)
 
-        cloudpickle.dump(rbp, open('RGPis.p', 'wb'))
+        cloudpickle.dump(rgp, open('RGPis.p', 'wb'))

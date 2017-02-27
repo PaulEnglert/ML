@@ -8,12 +8,12 @@ import numpy as np
 from timeit import default_timer as _t
 
 from utilities.data_utils import make_batches
-from utilities.util import Capturing, StopRecursion
+from utilities.util import Capturing, StopRecursion, setup_logger, reset_logger
+from utilities.stats import rv_coefficient, rv2_coefficient, distance_correlation
 
 from . import gp
 from neural_networks.perceptrons.slp import SLP, f_softplus
 from sklearn.linear_model import LinearRegression
-from scipy.spatial.distance import pdist, squareform
 
 import logging as _l
 
@@ -24,75 +24,6 @@ _lftrain = _l.getLogger('rgp.ftrain')
 _lfval = _l.getLogger('rgp.fval')
 _ltime = _l.getLogger('rgp.time')
 
-
-# %(levelname)s:\t%(message)s
-def setup_logger(logger_name, log_file, format='%(message)s', level=_l.INFO):
-    logger = _l.getLogger(logger_name)
-    formatter = _l.Formatter(format)
-    fileHandler = _l.FileHandler(log_file)
-    fileHandler.setFormatter(formatter)
-    streamHandler = _l.StreamHandler()
-    streamHandler.setFormatter(formatter)
-
-    logger.setLevel(level)
-    logger.addHandler(fileHandler)
-    # l.addHandler(streamHandler)
-    return logger
-
-
-# stats methods for matrix similarity:
-# http://math.stackexchange.com/questions/690972/
-#   distance-or-similarity-between-matrices-that-are-not-the-same-size
-def rv_coefficient(X, Y):
-    min_denominator = 0.000000000001
-    X = np.atleast_2d(X)
-    Y = np.atleast_2d(Y)
-    nom = np.trace(X.dot(X.T).dot(Y).dot(Y.T))
-    den = np.sqrt(np.trace(X.dot(X.T))**2 * np.trace(Y.dot(Y.T))**2)
-    return nom / den if den > min_denominator else 1
-
-
-def vec(X):
-    return np.reshape(X.T, (-1, 1))
-
-
-def rv2_coefficient(X, Y):
-    min_denominator = 0.000000000001
-    X = np.atleast_2d(X)
-    Y = np.atleast_2d(Y)
-    # https://academic.oup.com/bioinformatics/article/25/3/401/244239/Matrix-correlations-for-high-dimensional-data-the
-    vecX = vec(X.dot(X.T) - np.diag(X.dot(X.T)))
-    vecY = vec(Y.dot(Y.T) - np.diag(Y.dot(Y.T)))
-    nom = vecX.T.dot(vecY)
-    den = np.sqrt(vecX.T.dot(vecX) * vecY.T.dot(vecY))
-    return np.average(nom / den) if den > min_denominator else 1
-
-
-def distance_correlation(X, Y):
-    min_denominator = 0.000000000001
-    # https://gist.github.com/satra/aa3d19a12b74e9ab7941
-    X = np.atleast_1d(X)
-    Y = np.atleast_1d(Y)
-    if np.prod(X.shape) == len(X):
-        X = X[:, None]
-    if np.prod(Y.shape) == len(Y):
-        Y = Y[:, None]
-    X = np.atleast_2d(X)
-    Y = np.atleast_2d(Y)
-    n = X.shape[0]
-    if Y.shape[0] != X.shape[0]:
-        raise ValueError('Number of samples must match')
-    a = squareform(pdist(X))
-    b = squareform(pdist(Y))
-    A = a - a.mean(axis=0)[None, :] - a.mean(axis=1)[:, None] + a.mean()
-    B = b - b.mean(axis=0)[None, :] - b.mean(axis=1)[:, None] + b.mean()
-
-    dcov2_xy = (A * B).sum() / float(n * n)
-    dcov2_xx = (A * A).sum() / float(n * n)
-    dcov2_yy = (B * B).sum() / float(n * n)
-    nom = np.sqrt(dcov2_xy)
-    den = np.sqrt(np.sqrt(dcov2_xx) * np.sqrt(dcov2_yy))
-    return nom / den if den > min_denominator else 1
 
 class Node(gp.Node):
     """Overwrite standard to save a footprint of calculation"""
@@ -1021,6 +952,8 @@ class RGP(gp.GP):
     def log_config(self):
         _lmain.info('-----------------------------')
         _lmain.info('CONFIGURATION')
+        _lmain.info('Number of Features={0}'.format(Node.num_features))
+        _lmain.info('Constants={0}'.format(Node.constants))
         _lmain.info('reproduction_probability={0}'.format(RGP.reproduction_probability))
         _lmain.info('mutation_prob={0}'.format(RGP.mutation_probability))
         _lmain.info('crossover_prob={0}'.format(RGP.crossover_probability))
@@ -1052,14 +985,19 @@ class RGP(gp.GP):
         level = _l.INFO
         if RGP.debug:
             level = _l.DEBUG
+        reset_logger(logger_name='rgp.main')
         setup_logger(logger_name='rgp.main', log_file=os.path.join(base, self.rid + '-gp.log'),
                      level=level)
+        reset_logger(logger_name='rgp.time')
         setup_logger(logger_name='rgp.time', log_file=os.path.join(base, self.rid + '-time.log'),
                      level=_l.DEBUG if RGP.timeit else _l.INFO)
+        reset_logger(logger_name='rgp.ftrain')
         setup_logger(logger_name='rgp.ftrain', log_file=os.path.join(base, self.rid + '-fitnesstrain.txt'),
                      level=level)
+        reset_logger(logger_name='rgp.fval')
         setup_logger(logger_name='rgp.fval', log_file=os.path.join(base, self.rid + '-fitnessvalidation.txt'),
                      level=level)
+        reset_logger(logger_name='rgp.ftest')
         setup_logger(logger_name='rgp.ftest', log_file=os.path.join(base, self.rid + '-fitnesstest.txt'),
                      level=level)
 

@@ -3,7 +3,13 @@
 import os
 from datetime import datetime
 import numpy as np
-from utilities.util import StopRecursion
+from utilities.util import StopRecursion, setup_logger, reset_logger
+
+import logging as _l
+
+_lmain = _l.getLogger('gp.main')
+_lftest = _l.getLogger('gp.ftest')
+_lftrain = _l.getLogger('gp.ftrain')
 
 
 def protected_division(v1, v2):
@@ -425,6 +431,7 @@ class GP(object):
     mutation_maximum_depth = 6
     log_verbose = True
     log_stdout = True
+    debug = False
     log_file_path = 'results'
 
     def __init__(self, num_features, constants, size):
@@ -498,96 +505,77 @@ class GP(object):
             best = self.population.get_best()
 
             # logging
+            log_str += ' best training error={0}'.format(
+                best.get_fitness('train'))
+            log_str += ' with test error={0}'.format(
+                best.get_fitness('test'))
             if GP.log_stdout:
-                log_str += ' best training error={0}'.format(
-                    best.get_fitness('train'))
-                log_str += ' with test error={0}'.format(
-                    best.get_fitness('test'))
                 print log_str
             if GP.log_verbose:
-                log_str += ' best individual: \n{0}\n'.format(best)
-                log_str += ' number of size violations: {0}\n'.format(
-                    size_violation_count)
-                log_str += ' number of crossovers: {0}\n'.format(
-                    crossover_count)
-                log_str += ' number of mutations: {0}\n'.format(
-                    mutation_count)
-                log_str += ' avg size: {0}\n'.format(
-                    size_sum / self.population.size)
-                log_str += ' avg depth: {0}\n'.format(
-                    depth_sum / self.population.size)
-                self.log_state(g, best, log_str)
+                self.log_state(
+                    g, best, log_str, size_violation_count=size_violation_count,
+                    crossover_count=crossover_count, mutation_count=mutation_count,
+                    avg_size=(size_sum / self.population.size), avg_depth=(depth_sum / self.population.size))
 
-    def log_state(self, generation, best, logstr=''):
-        base = os.path.join(os.getcwd(), GP.log_file_path)
-        # log logstr
-        if logstr != '':
-            with open(os.path.join(
-                    base,
-                    self.rid + '-gp.log'), 'ab') as log:
-                log.write(logstr + '\n')
+    def log_state(self, generation, best, log_str, **kwargs):
+        if GP.log_verbose:
+            _lmain.info(log_str)
+            _lmain.info('best individual: \n{0}'.format(best))
+            _lmain.info('number of size violations: {0}'.format(kwargs.get('size_violation_count', '')))
+            _lmain.info('number of crossovers: {0}'.format(kwargs.get('crossover_count', '')))
+            _lmain.info('number of mutations: {0}'.format(kwargs.get('mutation_count', '')))
+            _lmain.info('avg size: {0}'.format(kwargs.get('avg_size'), ''))
+            _lmain.info('avg depth: {0}'.format(kwargs.get('avg_depth', '')))
         # log train fitness
-        with open(os.path.join(
-                base,
-                self.rid + '-fitnesstrain.txt'), 'ab') as log:
-            log.write('{0};{1};{2};{3}\n'.format(
-                generation,
-                best.get_fitness('train'),
-                best.size,
-                best.depth))
+        _lftrain.info('{0};{1};{2};{3}'.format(
+            generation,
+            best.get_fitness('train'),
+            best.size,
+            best.depth))
         # log test fitness
-        with open(os.path.join(
-                base,
-                self.rid + '-fitnesstest.txt'), 'ab') as log:
-            log.write('{0};{1}\n'.format(
-                generation,
-                best.get_fitness('test')))
+        _lftest.info('{0};{1}'.format(
+            generation,
+            best.get_fitness('test')))
 
     def prepare_logging(self):
+        self.rid = str(int(
+            (datetime.now() - datetime(1970, 1, 1)).total_seconds()))
+
         if not GP.log_verbose:
             return
+
         base = os.path.join(os.getcwd(), GP.log_file_path)
         if not os.path.exists(base):
             os.makedirs(base)
 
-        self.rid = str(int(
-            (datetime.now() - datetime(1970, 1, 1)).total_seconds()))
-        with open(os.path.join(
-                base,
-                self.rid + '-gp.log'), 'ab') as log:
-            log.write(self.name + '\n')
-        with open(os.path.join(
-                base,
-                self.rid + '-fitnesstrain.txt'), 'ab') as log:
-            log.write('Gen;Train Fitness;Size;Depth\n')
-        with open(os.path.join(
-                base,
-                self.rid + '-fitnesstest.txt'), 'ab') as log:
-            log.write('Gen;Test Fitness\n')
+        # update loggers
+        level = _l.INFO
+        if GP.debug:
+            level = _l.DEBUG
+        reset_logger(logger_name='gp.main')
+        setup_logger(logger_name='gp.main', log_file=os.path.join(base, self.rid + '-gp.log'),
+                     level=level)
+        reset_logger(logger_name='gp.ftrain')
+        setup_logger(logger_name='gp.ftrain', log_file=os.path.join(base, self.rid + '-fitnesstrain.txt'),
+                     level=level)
+        reset_logger(logger_name='gp.ftest')
+        setup_logger(logger_name='gp.ftest', log_file=os.path.join(base, self.rid + '-fitnesstest.txt'),
+                     level=level)
+
+        _lmain.info(self.name)
+        _lftest.info('Gen;Test Fitness')
+        _lftrain.info('Gen;Train Fitness;Size;Depth')
 
     def log_config(self):
-        data = 'CONFIG\n'
-        data += 'Number of Features=' + str(Node.num_features) + '\n'
-        data += 'Constants=' + str(Node.constants) + '\n'
-        data += 'reproduction_probability=' +\
-                str(GP.reproduction_probability) + '\n'
-        data += 'mutation_probability=' + str(GP.mutation_probability) + '\n'
-        data += 'crossover_probability=' + str(GP.crossover_probability) + '\n'
-        data += 'max_initial_depth=' + str(GP.max_initial_depth) + '\n'
-        data += 'apply_depth_limit=' + str(GP.apply_depth_limit) + '\n'
-        data += 'depth_limit=' + str(GP.depth_limit) + '\n'
-        data += 'mutation_maximum_depth=' +\
-                str(GP.mutation_maximum_depth) + '\n'
-        self.log(data)
-
-    def log(self, line, type='LOG'):
-        base = os.path.join(os.getcwd(), GP.log_file_path)
-        if type == 'LOG':
-            path = os.path.join(base, self.rid + '-gp.log')
-        elif type == 'TRAIN':
-            path = os.path.join(base, self.rid + '-fitnesstrain.txt')
-        elif type == 'TEST':
-            path = os.path.join(base, self.rid + '-fitnesstest.txt')
-        if path is not None:
-            with open(path, 'ab') as log:
-                log.write(line + '\n')
+        _lmain.info('------------------------')
+        _lmain.info('CONFIG')
+        _lmain.info('Number of Features={0}'.format(Node.num_features))
+        _lmain.info('Constants={0}'.format(Node.constants))
+        _lmain.info('reproduction_probability={0}'.format(GP.reproduction_probability))
+        _lmain.info('mutation_probability={0}'.format(GP.mutation_probability))
+        _lmain.info('crossover_probability={0}'.format(GP.crossover_probability))
+        _lmain.info('max_initial_depth={0}'.format(GP.max_initial_depth))
+        _lmain.info('apply_depth_limit={0}'.format(GP.apply_depth_limit))
+        _lmain.info('depth_limit={0}'.format(GP.depth_limit))
+        _lmain.info('mutation_maximum_depth={0}'.format(GP.mutation_maximum_depth))
+        _lmain.info('------------------------')

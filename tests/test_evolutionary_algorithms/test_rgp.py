@@ -57,9 +57,10 @@ class TestRGP(unittest.TestCase):
         RGP.max_initial_depth = 6
         RGP.log_file_path = base + 'results/'
         RGP.log_stdout = True
-        RGP.debug = True
-        RGP.timeit = True
-        RGP.gp_config['skip_generations'] = 5
+        RGP.debug = False
+        RGP.timeit = False
+        RGP.collect_footprints = (False, 10, 4)
+        RGP.gp_config['skip_generations'] = 10
         rgp = RGP(num_features, constants, 200)
 
         _l.getLogger('rgp.main').info("Train_file = {0}".format(
@@ -72,6 +73,13 @@ class TestRGP(unittest.TestCase):
             train[:, :-1], train[:, -1],
             val[:, :-1], val[:, -1],
             test[:, :-1], test[:, -1],
-            100)
+            150)
 
         cloudpickle.dump(rgp, open('RGPis.p', 'wb'))
+
+    def test_multiple_ist_stock(self):
+        self.test_ist_stock()
+        self.test_ist_stock()
+        self.test_ist_stock()
+        self.test_ist_stock()
+        self.test_ist_stock()

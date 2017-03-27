@@ -11,7 +11,7 @@ from utilities.data_utils import make_batches
 from utilities.util import Capturing, StopRecursion, setup_logger, reset_logger
 from utilities.stats import rv_coefficient, rv2_coefficient, distance_correlation
 
-from . import gp
+from . import gp_v2 as gp
 from neural_networks.perceptrons.slp import SLP, f_softplus
 from sklearn.linear_model import LinearRegression
 
@@ -27,8 +27,19 @@ _ltime = _l.getLogger('rgp.time')
 
 class Node(gp.Node):
     """Overwrite standard to save a footprint of calculation"""
+    def __init__(self, parent, function):
+        super(Node, self).__init__(parent, function)
 
-    def traverse_and_collect(
+    def calculate_depth(self):
+        if len(self.children) > 0:
+            return np.max([[c.calculate_depth() for c in self.children]]) + 1
+        return 0
+
+    def calculate_size(self):
+        return np.sum([c.calculate_size() for c in self.children]) + 1
+
+    # overwrite to collect footprints in addition
+    def compute_and_collect(
             self, node_dict, footprint, X, n_steps, early_exit_depth=None):
         # collect all information in one pass,
         # exit early if max depth is reached
@@ -41,7 +52,7 @@ class Node(gp.Node):
             raise StopRecursion()
         # calculate data for all children
         for c in self.children:
-            y, s, d = c.traverse_and_collect(
+            y, s, d = c.compute_and_collect(
                 node_dict, footprint, X, n_steps + 1, early_exit_depth)
             inputs.append(y)
             if d > depth:
@@ -52,14 +63,34 @@ class Node(gp.Node):
         # pass on the own data
         return (self.Y, size, depth + 1)
 
-    def copy(self, nodes_dict=None, parent=None):
-        newself = Node(parent, self.function)
-        if nodes_dict is not None:
-            nodes_dict[newself.id] = newself
-        for c in range(newself.function['arity']):
-            newself.children.append(
-                self.children[c].copy(nodes_dict=nodes_dict, parent=newself))
-        return newself
+
+class Tree(gp.Tree):
+
+    # overwrite init to pass in scope (changes the used Node class)
+    def __init__(self, min_depth, max_depth, f_set, num_features, constants):
+        super(Tree, self).__init__(min_depth, max_depth, f_set, num_features,
+                                   constants, scope={'node_class': Node})
+
+        self.footprint = {'train': [], 'val': [], 'test': []}
+
+    def compute(self, X, depth_limit=None, collect_additional=False):
+        np.seterr(all='ignore')
+        try:
+            if collect_additional:
+                fp = []
+                self.nodes = {}
+                result, self.size, self.depth = self.root.compute_and_collect(
+                    self.nodes, fp, X, 0, depth_limit)
+            else:
+                result = self.root.compute(X)
+        except StopRecursion:
+            result = [np.Inf for i in X]
+            self.depth = np.Inf
+            self.size = np.Inf
+        np.seterr(all='warn')
+        if collect_additional:
+            return result, fp
+        return result
 
 
 class Individual(gp.Individual):
@@ -68,81 +99,34 @@ class Individual(gp.Individual):
         programs. The last column is the root nodes prediciton
     """
 
-    def __init__(self, min_depth, max_depth):
-        self.id = Individual.count
-        Individual.count += 1
+    def __init__(self, min_depth, max_depth, gp_instance, **kwargs):
+        super(Individual, self).__init__(min_depth, max_depth, gp_instance,
+                                         scope={'tree_class': Tree})
         self.footprint = {'train': [], 'val': [], 'test': []}
         self.last_semantics = {'train': None, 'val': None, 'test': None}
         self.last_error = {'train': None, 'val': None, 'test': None}
-        # initialize tree
-        if max_depth == 0:  # force end of tree at root
-            self.root = Node(None, function=Node.get_random_T())
-        elif min_depth > 0:  # prevent ending of tree at root
-            self.root = Node(None, function=Node.get_random_F())
-        else:  # probabilistic ending of tree at root
-            self.root = Node(None, function=Node.get_random_TF())
-        self.nodes = {self.root.id: self.root}
-        self.grow(self.root, 0, min_depth, max_depth, nodes_dict=self.nodes)
 
-    def __evaluate(self, X, Y, data_type='train'):
-        start_t = _t()
-        self.nodes = {}
-        self.footprint[data_type] = []
-        np.seterr(all='ignore')
-        dl = Individual.depth_limit if Individual.apply_depth_limit else None
-        try:
-            result, self.size, self.depth = self.root.traverse_and_collect(
-                self.nodes, self.footprint[data_type], X, 0, dl)
-        except StopRecursion:
-            result = [np.Inf for i in X]
-            self.depth = np.Inf
-            self.size = np.Inf
-        np.seterr(all='warn')
-        self.last_semantics[data_type] = result
+    # overwrite to recieve footprint as well
+    def __evaluate_all(self, X, Y, data_type):
+        dl = self.depth_limit if self.apply_depth_limit else None
+        self.last_semantics[data_type], self.footprint[data_type] = self.tree.compute(
+            X, dl, collect_additional=True)
         self.last_error[data_type] = np.sqrt(np.sum(
             (self.last_semantics[data_type] - Y)**2) / X.shape[0])
-        _ltime.debug('4;individual-full-evaluate;{0}'.format(_t() - start_t))
         return self.last_error[data_type]
 
+    # overwrite to evaluate validation data as well
     def evaluate(self, X, Y, valX, valY, testX=None, testY=None):
         # collect as much information as possible here
-        self.__evaluate(X, Y, 'train')
-        if self.depth == np.Inf:
-            return
-        # for these only run the computation
+        super(Individual, self).evaluate(X, Y, testX, testY)
+        # also run validation data
         if valX is not None and valY is not None:
-            self.compute(valX, 'val')
+            self.__evaluate_X(valX, 'val')
             self.last_error['val'] = np.sqrt(np.sum(
                 (self.last_semantics['val'] - valY)**2) / valX.shape[0])
-        if testX is not None and testY is not None:
-            self.compute(testX, 'test')
-            self.last_error['test'] = np.sqrt(np.sum(
-                (self.last_semantics['test'] - testY)**2) / testX.shape[0])
-
-    def grow(
-            self, parent, cur_depth, min_depth=0,
-            max_depth=None, nodes_dict=None):
-        if max_depth is None:
-            max_depth = 950  # prevent recursion depth exception
-        for i in range(parent.function['arity']):
-            if cur_depth < min_depth:
-                newnode = Node(parent, Node.get_random_F())
-            elif max_depth is None or cur_depth < max_depth:
-                newnode = Node(parent, Node.get_random_TF())
-            else:  # force terminal element
-                newnode = Node(parent, Node.get_random_T())
-                if cur_depth == 950:
-                    print "WARNING: Reached Maximum Recursion Limit!"
-            parent.children.append(newnode)
-            if nodes_dict is not None:
-                nodes_dict[newnode.id] = newnode
-            # grow new branch
-            self.grow(
-                parent.children[i], cur_depth + 1, min_depth=min_depth,
-                max_depth=max_depth, nodes_dict=nodes_dict)
 
     def evaluate_footprint(self):
-        """ Train an MLP on the footprint on a program to identify
+        """ Train an MLA on the footprint on a program to identify
             important subprograms
         """
         start_t = _t()
@@ -158,9 +142,9 @@ class Individual(gp.Individual):
         raw = (raw - np.min(raw)) / (np.max(raw) - np.min(raw))
         # get weighting of features
         if RGP.r_general['sub_prog_classifier'] == 'nn':
-            weights = Individual.process_by_nn(raw)
+            weights = self.__class__.process_by_nn(raw)
         elif RGP.r_general['sub_prog_classifier'] == 'lr':
-            weights = Individual.process_by_lr(raw)
+            weights = self.__class__.process_by_lr(raw)
         else:
             raise Exception('Unknown Sub Program Classifier')
         # determine most important subprogram based on weights
@@ -183,9 +167,9 @@ class Individual(gp.Individual):
             minsize = RGP.r_general['min_program_size']
             maxsize = RGP.r_general['max_program_size']
             if minsize is not None and minsize < 1:
-                minsize = self.size * minsize
+                minsize = self.tree.size * minsize
             if maxsize is not None and maxsize < 1:
-                maxsize = self.size * maxsize
+                maxsize = self.tree.size * maxsize
             # print 'Size of OP:{0}; Min:{1}; Max:{2}'.format(
             #    s, minsize, maxsize)
             if (s >= minsize or
@@ -267,9 +251,9 @@ class Individual(gp.Individual):
             minsize = RGP.r_general['min_program_size']
             maxsize = RGP.r_general['max_program_size']
             if minsize is not None and minsize <= 1:
-                minsize = self.size * minsize
+                minsize = self.tree.size * minsize
             if maxsize is not None and maxsize <= 1:
-                maxsize = self.size * maxsize
+                maxsize = self.tree.size * maxsize
             if (s >= minsize or
                 minsize is None) and \
                 (s <= maxsize or
@@ -326,27 +310,11 @@ class Individual(gp.Individual):
             return True
         return False
 
-    def create_random(self, max_depth=None):
-        parent = Node(None, Node.get_random_TF())
-        self.grow(parent, 0, max_depth=max_depth)
-        return parent
-
     def copy(self):
-        newself = Individual(0, 0)
-        newself.depth = self.depth
-        newself.size = self.size
-        for k in self.last_semantics.keys():
-            if self.last_semantics[k] is not None:
-                newself.last_semantics[k] = np.copy(self.last_semantics[k])
-        for k in self.last_error.keys():
-            if self.last_error[k] is not None:
-                newself.last_error[k] = self.last_error[k]
+        newself = super(Individual, self).copy()
         for k in self.footprint.keys():
             if self.footprint[k] is not None:
                 newself.footprint[k] = self.footprint[k]
-        newself.nodes = {}
-        newself.root = self.root.copy(newself.nodes)
-        assert len(newself.nodes) == len(self.nodes)
         return newself
 
 
@@ -354,104 +322,54 @@ class Population(gp.Population):
     validation_elite = []
     repulsers = []
 
-    def __init__(self, size, selection_type):
-        self.selection_type = selection_type
-        self.size = size
-        self.individuals = []
+    def __init__(self, size, gp_instance, selection_type=None, **kwargs):
+        super(Population, self).__init__(size, gp_instance, selection_type=None,
+                                             scope={'individual_class': Individual}, **kwargs)
 
-    def create_individuals(
-            self, init_min_depth=0, max_depth=6, init_type=None):
-        if init_type is None:
-            init_type = Population.ramped
-        self.individuals = init_type(
-            self.size, init_min_depth, max_depth)
-
-    def select(self, count=1):
-        if count == 1:
-            return self.selection_type(self.individuals)
-        return [self.selection_type(self.individuals)
-                for i in range(count)]
-
+    # overwrite to time execution and evaluate validation data
     def evaluate(self, X, Y, valX, valY, testX=None, testY=None):
         start_t = _t()
         for i in self.individuals:
             i.evaluate(X, Y, valX, valY, testX, testY)
         _ltime.debug('3;population-evaluation;{0}'.format(_t() - start_t))
 
-    @staticmethod
-    def ramped(size, min_depth, max_depth):
-        individuals = []
-        bucket_size = int(size / (1 + max_depth - min_depth))
-        for bucket in range(min_depth, max_depth + 1):
-            for i in range(bucket_size):
-                if i % 2 == 0:  # allow normal grow
-                    individuals.append(Individual(min_depth, bucket))
-                else:  # force full growth
-                    individuals.append(Individual(bucket, bucket))
-        # fill up missing, e.g. due to unclean bucketing:
-        full = False
-        while len(individuals) < size:
-            if not full:
-                individuals.append(Individual(min_depth, max_depth))
-                full = True
-            if full:
-                individuals.append(Individual(max_depth, max_depth))
-                full = False
-        return individuals
-
-    @staticmethod
-    def grow(size, min_depth, max_depth, num_features, constants):
-        individuals = []
-        while len(individuals) < size:
-            individuals.append(Individual(min_depth, max_depth))
-        return individuals
-
-    @staticmethod
-    def full(size, min_depth, max_depth, num_features, constants):
-        individuals = []
-        while len(individuals) < size:
-            individuals.append(Individual(max_depth, max_depth))
-        return individuals
-
     def apply_for_validation_elite(self, applicant):
         start_t = _t()
-        if len(Population.validation_elite) <\
-                RGP.gp_config['validation_elite_size']:
-            Population.validation_elite.append(applicant)
+        if len(self.__class__.validation_elite) < RGP.gp_config['validation_elite_size']:
+            self.__class__.validation_elite.append(applicant)
         else:
             rpl = np.argmax([i.get_fitness('val')
-                            for i in Population.validation_elite])
-            if Population.validation_elite[rpl].get_fitness('val') >\
-                    applicant.get_fitness('val'):
-                Population.validation_elite[rpl] = applicant
+                            for i in self.__class__.validation_elite])
+            if self.__class__.validation_elite[rpl].get_fitness('val') > applicant.get_fitness('val'):
+                self.__class__.validation_elite[rpl] = applicant
         _ltime.debug('3;apply-for-validation-elite;{0}'.format(_t() - start_t))
 
     def get_best_n(self, count, data_type='train'):
-        return Population.get_best_n(self.individuals, count, data_type)
+        return self.__class__.filter_best_n(self.individuals, count, data_type)
 
     def get_penalized_best(self):
         if len(self.repulsers) == 0:
             return self.get_best()
-        return Population.filter_penalized_best(self.individuals)
+        return self.__class__.filter_penalized_best(self.individuals)
 
     def get_val_elite_fitnesses(self):
         if RGP.gp_config['validation_elite_repr'] == 'median':
-            size = len(Population.validation_elite)
+            size = len(self.__class__.validation_elite)
             b = np.argsort([i.get_fitness('val')
-                            for i in Population.validation_elite])[size // 2]
-            return (Population.validation_elite[b].get_fitness('train'),
-                    Population.validation_elite[b].get_fitness('val'))
+                            for i in self.__class__.validation_elite])[size // 2]
+            return (self.__class__.validation_elite[b].get_fitness('train'),
+                    self.__class__.validation_elite[b].get_fitness('val'))
         if RGP.gp_config['validation_elite_repr'] == 'avg':
             ft = np.average([i.get_fitness('train')
-                            for i in Population.validation_elite])
+                            for i in self.__class__.validation_elite])
             fv = np.average([i.get_fitness('val')
-                            for i in Population.validation_elite])
+                            for i in self.__class__.validation_elite])
             return (ft, fv)
 
     @staticmethod
     def filter_best_n(array, count, data_type='train'):
         f = [i.get_fitness(data_type) for i in array]
-        idcs = np.argsort(f)[-count:].tolist()
+        idcs = np.argsort(f)[:count].tolist()
         return [array[i] for i in idcs]
 
     @staticmethod
@@ -491,24 +409,24 @@ class Population(gp.Population):
         return F
 
     @staticmethod
-    def mo_tournament(individuals):
+    def mo_tournament(individuals, **kwargs):
         """Select based on rank or random"""
         if len(Population.repulsers) == 0:
             return Population.tournament(individuals)
 
         participants = [individuals[int(np.random.rand() * len(individuals))]
-                        for i in range(Population.tournament_size)]
+                        for i in range(kwargs.get('tournament_size', 4))]
 
         return Population.pareto_best(participants)
 
     @staticmethod
-    def so_tournament_penalized(individuals):
+    def so_tournament_penalized(individuals, **kwargs):
         """Select based on penalized fitness"""
         if len(Population.repulsers) == 0:
             return Population.tournament(individuals)
 
         participants = [individuals[int(np.random.rand() * len(individuals))]
-                        for i in range(Population.tournament_size)]
+                        for i in range(kwargs.get('tournament_size', 4))]
 
         return Population.filter_penalized_best(participants)
 
@@ -573,6 +491,9 @@ class Population(gp.Population):
 class RGP(gp.GP):
     """Hybrid GP using any ML to repulse overfitting Solutions"""
     debug = False
+    # collect footprints (activate, from generation, number if individuals per generation)
+    collect_footprints = (False, 250, 4)
+    footprints_path = 'footprints.txt'
     timeit = False
     # Technique to use for repulsing individuals
     repulse_by = 'semantics'  # semantics | syntax
@@ -690,31 +611,29 @@ class RGP(gp.GP):
 
     def __init__(self, num_features, constants, size):
         self.name = "RGP"
-        Node.constants = constants
-        gp.Node.constants = constants
-        Node.num_features = num_features
-        gp.Node.num_features = num_features
+        self.constants = constants
+        self.num_features = num_features
 
         Population.validation_elite = []
         Population.repulsers = []
+
+        self.set_function_set(
+            gp.Function.f_add, gp.Function.f_subtract, gp.Function.f_divide, gp.Function.f_multiply)
 
         if RGP.gp_config['search_operator'] == 'mo':
             self.sel_type = Population.mo_tournament
         else:
             self.sel_type = Population.so_tournament_penalized
         self.population = Population(
-            size, selection_type=self.sel_type)
+            size, self, selection_type=self.sel_type, tournament_size=RGP.tournament_size)
         self.population.create_individuals(
-            init_min_depth=1, max_depth=RGP.max_initial_depth,
-            init_type=None)
+            init_min_depth=1, max_depth=RGP.max_initial_depth, init_type=None,
+            depth_limit=RGP.depth_limit, apply_depth_limit=RGP.apply_depth_limit)
 
         self.prepare_logging()
         self.log_config()
 
     def evolve(self, X, Y, valX, valY, testX=None, testY=None, generations=25):
-        Individual.depth_limit = RGP.depth_limit
-        Individual.apply_depth_limit = RGP.apply_depth_limit
-
         # evaluate on training and validation
         self.population.evaluate(X, Y, valX, valY, testX, testY)
 
@@ -739,15 +658,16 @@ class RGP(gp.GP):
 
             # create new population
             new_population = Population(
-                self.population.size, selection_type=self.sel_type)
+                self.population.size, self, selection_type=self.sel_type,
+                tournament_size=RGP.tournament_size)
 
             # copy the elite individual over to the next population
             # unless it's forbidden by configuration
             if not RGP.gp_config['prevent_elitism']:
                 elitist = self.select_elitist()
                 if RGP.log_verbose:
-                    size_sum = elitist.size
-                    depth_sum = elitist.depth
+                    size_sum = elitist.tree.size
+                    depth_sum = elitist.tree.depth
                 new_population.individuals.append(elitist)
             _ltime.debug('1;prepocessing-phase;{0}'.format(_t() - start_pp))
 
@@ -778,15 +698,15 @@ class RGP(gp.GP):
                     offspring.evaluate(X, Y, valX, valY, testX, testY)
                 # apply depth limit
                 if RGP.apply_depth_limit:
-                    if offspring.depth > RGP.depth_limit:
+                    if offspring.tree.depth > RGP.depth_limit:
                         size_violation_count += 1
                         offspring = p1.copy()  # overwrite an offspring with p1
 
                 # add individual to new population
                 new_population.individuals.append(offspring)
                 if RGP.log_verbose:
-                    size_sum += offspring.size
-                    depth_sum += offspring.depth
+                    size_sum += offspring.tree.size
+                    depth_sum += offspring.tree.depth
 
             _ltime.debug('1;variation-phase;{0}'.format(_t() - start_vp))
             start_pp = _t()
@@ -796,6 +716,22 @@ class RGP(gp.GP):
 
             # determine fitness best individual
             best = self.population.get_best('train')
+
+            # if whished log footprint information 
+            if RGP.collect_footprints[0] and g > RGP.collect_footprints[1]:
+                bf1, bf2 = self.population.get_val_elite_fitnesses()
+                for i in self.population.get_best_n(RGP.collect_footprints[2]):
+                    f1, f2 = i.get_fitness('train'), i.get_fitness('val')
+                    fp = []
+                    for x in i.footprint['train']:
+                        fp.append(x['Y'])
+                    fp = np.asarray(fp).T
+                    fp = np.append(fp, [[f1] for i in range(len(fp))], axis=1)
+                    fp = np.append(fp, [[f2] for i in range(len(fp))], axis=1)
+                    fp = np.append(fp, [[bf1] for i in range(len(fp))], axis=1)
+                    fp = np.append(fp, [[bf2] for i in range(len(fp))], axis=1)
+                    with open(RGP.footprints_path, 'ab') as log_file:
+                        np.savetxt(log_file, fp, delimiter=";")
 
             # start testing for overfitting after n generations
             if g > RGP.gp_config['skip_generations']:
@@ -935,8 +871,8 @@ class RGP(gp.GP):
         _lftrain.info('{0};{1};{2};{3};{4};{5};{6}'.format(
             generation,
             best.get_fitness('train'),
-            best.size,
-            best.depth,
+            best.tree.size,
+            best.tree.depth,
             best.rank if hasattr(best, 'rank') else None,
             best.offensiveness if hasattr(best, 'offensiveness') else None,
             len(Population.repulsers)))
@@ -952,8 +888,9 @@ class RGP(gp.GP):
     def log_config(self):
         _lmain.info('-----------------------------')
         _lmain.info('CONFIGURATION')
-        _lmain.info('Number of Features={0}'.format(Node.num_features))
-        _lmain.info('Constants={0}'.format(Node.constants))
+        _lmain.info('Number of Features={0}'.format(self.num_features))
+        _lmain.info('Constants={0}'.format(self.constants))
+        _lmain.info('Population Size={0}'.format(self.population.size))
         _lmain.info('reproduction_probability={0}'.format(RGP.reproduction_probability))
         _lmain.info('mutation_prob={0}'.format(RGP.mutation_probability))
         _lmain.info('crossover_prob={0}'.format(RGP.crossover_probability))
@@ -980,6 +917,12 @@ class RGP(gp.GP):
         base = os.path.join(os.getcwd(), RGP.log_file_path)
         if not os.path.exists(base):
             os.makedirs(base)
+
+        # update RGP.footprints_path
+        RGP.footprints_path = os.path.join(base, self.rid + '-footprints.txt')
+        if RGP.collect_footprints[0]:
+            with open(RGP.footprints_path, 'ab') as log_file:
+                log_file.write('footprint; last 4 columns: fitnesstrain, fitnessval, validation best fitnesstrain, validation best fitnessval\n')
 
         # update loggers
         level = _l.INFO

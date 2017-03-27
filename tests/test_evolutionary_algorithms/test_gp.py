@@ -47,6 +47,7 @@ class TestGP(unittest.TestCase):
         GP.maximum_initial_depth = 6
         GP.log_file_path = base + 'results/'
         GP.log_stdout = True
+        GP.log_verbose = True
         gp = GP(num_features, constants, 200)
 
         gp.evolve(

@@ -41,3 +41,22 @@ def reset_logger(logger_name):
     logger.setLevel(_l.INFO)
     logger.handlers = []
     return logger
+
+
+def str_count_pattern(astr, pattern):
+    astr, pattern = astr.strip(), pattern.strip()
+    if pattern == '':
+        return 0
+
+    ind, count, start_flag = 0, 0, 0
+    while True:
+        try:
+            if start_flag == 0:
+                ind = astr.index(pattern)
+                start_flag = 1
+            else:
+                ind += 1 + astr[ind + 1:].index(pattern)
+            count += 1
+        except:
+            break
+    return count

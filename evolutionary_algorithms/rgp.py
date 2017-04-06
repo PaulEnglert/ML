@@ -10,7 +10,7 @@ from timeit import default_timer as _t
 import pickle
 
 from utilities.data_utils import make_batches
-from utilities.util import Capturing, StopRecursion, setup_logger, reset_logger
+from utilities.util import Capturing, StopRecursion, setup_logger, reset_logger, str_count_pattern
 from utilities.stats import rv_coefficient, rv2_coefficient, distance_correlation, pca
 
 from . import gp_v2 as gp
@@ -223,14 +223,8 @@ class Individual(gp.Individual):
         # (weighted by the severity, normalized by number of progs)
         start_t = _t()
         ws = 0
-        count = 0
         for sp in Population.repulsers:
-            try:
-                c = len(re.findall(sp['str'], str(self)))
-            except:
-                c = 100
-            count += c
-            ws += sp['severity'] * c
+            ws += sp['severity'] * str_count_pattern(sp['str'], str(self))
         self.offensiveness = ws / len(Population.repulsers)
         _ltime.debug('4;evaluate-syntactic-goodness;{0}'.format(_t() - start_t))
 

@@ -2,10 +2,14 @@
 
 import os
 from datetime import datetime
-import re
 import dill
 import numpy as np
 from timeit import default_timer as _t
+from functools import partial
+import signal
+
+from pathos.pools import ProcessPool as Pool
+from multiprocessing import cpu_count
 
 import pickle
 
@@ -13,20 +17,24 @@ from utilities.data_utils import make_batches
 from utilities.util import Capturing, StopRecursion, setup_logger, reset_logger, str_count_pattern
 from utilities.stats import rv_coefficient, rv2_coefficient, distance_correlation, pca
 
-from . import gp_v2 as gp
+from . import gp as gp
 from neural_networks.perceptrons.slp import SLP, f_softplus
 from sklearn.linear_model import LinearRegression
 from sklearn.utils import shuffle
 
 import logging as _l
 
-
+num_cpus = cpu_count()
 _lmain = _l.getLogger('rgp.main')
 _lftest = _l.getLogger('rgp.ftest')
 _lftrain = _l.getLogger('rgp.ftrain')
 _lfval = _l.getLogger('rgp.fval')
 _ltime = _l.getLogger('rgp.time')
 _laccuracies = _l.getLogger('rgp.accuracies')
+
+
+def init_worker():
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
 class Node(gp.Node):
@@ -176,10 +184,7 @@ class Individual(gp.Individual):
                 maxsize = self.tree.size * maxsize
             # print 'Size of OP:{0}; Min:{1}; Max:{2}'.format(
             #    s, minsize, maxsize)
-            if (s >= minsize or
-                minsize is None) and \
-                (s <= maxsize or
-                    maxsize is None):
+            if (s >= minsize or minsize is None) and (s <= maxsize or maxsize is None):
                 result.append(str(self.footprint['train'][i]['sp']))
         _ltime.debug('4;blame-subprogram-syntax;{0}'.format(_t() - start_t))
         return result
@@ -252,10 +257,7 @@ class Individual(gp.Individual):
                 minsize = self.tree.size * minsize
             if maxsize is not None and maxsize <= 1:
                 maxsize = self.tree.size * maxsize
-            if (s >= minsize or
-                minsize is None) and \
-                (s <= maxsize or
-                    maxsize is None):
+            if (s >= minsize or minsize is None) and (s <= maxsize or maxsize is None):
                 # extract subprogram footprint
                 r_data = {'train': [], 'val': [], 'test': []}
                 d_types = []
@@ -272,34 +274,53 @@ class Individual(gp.Individual):
         _ltime.debug('4;blame-subprogram-semantics;{0}'.format(_t() - start_t))
         return result
 
-    def evaluate_semantic_goodness(self, data_type='train'):
+    def evaluate_semantic_goodness(self, data_type='train', parallel=False):
         start_t = _t()
         fp = []
         for x in self.footprint[data_type]:
             fp.append(x['Y'])
         fp = np.asarray(fp).T
-        self.offensiveness_l = []  # list of similarities to all repulsers
+        if RGP.r_sema['similarity_measure'] == 'RV':
+            measure = rv_coefficient
+        elif RGP.r_sema['similarity_measure'] == 'RV2':
+            measure = rv2_coefficient
+        elif RGP.r_sema['similarity_measure'] == 'DC':
+            measure = distance_correlation
+        else:
+            raise 'Unknown similarity measure specified (options: RV, RV2 or DC)'
+
+        # parallel computation of similarities
+        partial_measure = partial(measure, fp)
+        rep_data = []
         for r in Population.repulsers:
-            if RGP.r_sema['similarity_measure'] == 'RV':
-                # needs to be inversed, since it denotes
-                # similarity not distance
-                self.offensiveness_l.append(1 - np.abs(rv_coefficient(
-                    fp, r['str'][data_type])))
-            elif RGP.r_sema['similarity_measure'] == 'RV2':
-                self.offensiveness_l.append(1 - np.abs(rv2_coefficient(
-                    fp, r['str'][data_type])))
-            elif RGP.r_sema['similarity_measure'] == 'DC':
-                self.offensiveness_l.append(1 - np.abs(distance_correlation(
-                    fp, r['str'][data_type])))
+            rep_data.append(r['str'][data_type])
+
+        if parallel:
+            pool = Pool(nodes=num_cpus, initializer=init_worker)
+            pool.ncpus = num_cpus
+            try:
+                # run computation
+                result = pool.map(partial_measure, rep_data)
+            except KeyboardInterrupt:
+                pool.terminate()
+                pool.join()
+        else:
+            result = []
+            for d in rep_data:
+                result.append(partial_measure(d))
+        # list of similarities to all repulsers
+        self.offensiveness_l = np.abs(result)
         # aggregate offensiveness
-        self.offensiveness = np.average(np.abs(self.offensiveness_l))
-        _ltime.debug('4;evaluate-semantic-goodness;{0}'.format(_t() - start_t))
+        self.offensiveness = np.average(self.offensiveness_l)
+        if parallel:
+            _ltime.debug('4;evaluate-semantic-goodness-parallel;{0}'.format(_t() - start_t))
+        else:
+            _ltime.debug('4;evaluate-semantic-goodness-sequential;{0}'.format(_t() - start_t))
 
     # ############## GENERAL DEPENDENCIES ##############
     def dominates(self, opponent):
         fit = self.get_fitness('train') < opponent.get_fitness('train')
-        if RGP.repulse_by == 'semantics' and\
-                not RGP.r_sema['mo_search']['aggregated_goodness']:
+        if RGP.repulse_by == 'semantics' and not RGP.r_sema['mo_search']['aggregated_goodness']:
             off = np.abs(self.offensiveness_l) < np.abs(opponent.offensiveness)
             return fit and (np.sum(off) == len(self.offensiveness_l))
 
@@ -322,7 +343,7 @@ class Population(gp.Population):
 
     def __init__(self, size, gp_instance, selection_type=None, **kwargs):
         super(Population, self).__init__(size, gp_instance, selection_type=None,
-                                             scope={'individual_class': Individual}, **kwargs)
+                                         scope={'individual_class': Individual}, **kwargs)
 
     # overwrite to time execution and evaluate validation data
     def evaluate(self, X, Y, valX=None, valY=None, testX=None, testY=None):
@@ -497,6 +518,7 @@ class RGP(gp.GP):
     collect_footprints = (False, 250, 4)
     footprints_path = 'footprints.txt'
     timeit = False
+    parallel_execution = False
     # Technique to use for repulsing individuals
     repulse_by = 'semantics'  # semantics | syntax
 
@@ -725,8 +747,7 @@ class RGP(gp.GP):
                     offspring = p1.crossover(self.population.select())
                     offspring.evaluate(X, Y, valX, valY, testX, testY)
                 # do mutation
-                elif r < RGP.crossover_probability +\
-                        RGP.mutation_probability:
+                elif r < RGP.crossover_probability + RGP.mutation_probability:
                     if RGP.log_verbose:
                         mutation_count += 1
                     offspring = p1.mutate()
@@ -862,7 +883,7 @@ class RGP(gp.GP):
                     if RGP.repulse_by == 'syntax':
                         i.evaluate_syntactic_goodness()
                     elif RGP.repulse_by == 'semantics':
-                        i.evaluate_semantic_goodness()
+                        i.evaluate_semantic_goodness(data_type='train', parallel=RGP.parallel_execution)
                     avg_offensiveness += i.offensiveness
                 avg_offensiveness /= self.population.size
                 _ltime.debug('2;p-calculate-offensiveness;{0}'.format(_t() - start_ou))
@@ -902,8 +923,7 @@ class RGP(gp.GP):
                 raise Exception('search_for {0} not implemented').format(
                     cfg['so_params']['search_for'])
         # multi objective
-        if len(Population.repulsers) == 0 or not\
-                cfg['mo_params']['pareto_elitism']:
+        if len(Population.repulsers) == 0 or not cfg['mo_params']['pareto_elitism']:
             # fall back to standard if nothing has been collected yet or
             # it's configured
             return self.population.get_best()

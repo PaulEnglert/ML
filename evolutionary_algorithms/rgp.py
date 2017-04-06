@@ -7,13 +7,16 @@ import dill
 import numpy as np
 from timeit import default_timer as _t
 
+import pickle
+
 from utilities.data_utils import make_batches
 from utilities.util import Capturing, StopRecursion, setup_logger, reset_logger
-from utilities.stats import rv_coefficient, rv2_coefficient, distance_correlation
+from utilities.stats import rv_coefficient, rv2_coefficient, distance_correlation, pca
 
 from . import gp_v2 as gp
 from neural_networks.perceptrons.slp import SLP, f_softplus
 from sklearn.linear_model import LinearRegression
+from sklearn.utils import shuffle
 
 import logging as _l
 
@@ -23,6 +26,7 @@ _lftest = _l.getLogger('rgp.ftest')
 _lftrain = _l.getLogger('rgp.ftrain')
 _lfval = _l.getLogger('rgp.fval')
 _ltime = _l.getLogger('rgp.time')
+_laccuracies = _l.getLogger('rgp.accuracies')
 
 
 class Node(gp.Node):
@@ -116,7 +120,7 @@ class Individual(gp.Individual):
         return self.last_error[data_type]
 
     # overwrite to evaluate validation data as well
-    def evaluate(self, X, Y, valX, valY, testX=None, testY=None):
+    def evaluate(self, X, Y, valX=None, valY=None, testX=None, testY=None):
         # collect as much information as possible here
         super(Individual, self).evaluate(X, Y, testX, testY)
         # also run validation data
@@ -327,7 +331,7 @@ class Population(gp.Population):
                                              scope={'individual_class': Individual}, **kwargs)
 
     # overwrite to time execution and evaluate validation data
-    def evaluate(self, X, Y, valX, valY, testX=None, testY=None):
+    def evaluate(self, X, Y, valX=None, valY=None, testX=None, testY=None):
         start_t = _t()
         for i in self.individuals:
             i.evaluate(X, Y, valX, valY, testX, testY)
@@ -491,12 +495,21 @@ class Population(gp.Population):
 class RGP(gp.GP):
     """Hybrid GP using any ML to repulse overfitting Solutions"""
     debug = False
+    # do everything except for actually repulsing and calculating offensiveness
+    # e.g. to collect accuracies with not such a huge time consumtion
+    simulate_repulsing = False
+    collect_accuracies = False
     # collect footprints (activate, from generation, number if individuals per generation)
     collect_footprints = (False, 250, 4)
     footprints_path = 'footprints.txt'
     timeit = False
     # Technique to use for repulsing individuals
     repulse_by = 'semantics'  # semantics | syntax
+
+    # settings for using a model instead of the valiation data
+    validation_substitute = {
+        'equalize_observation_count': 'sample'  # 'pca' | 'sample'
+    }
 
     gp_config = {
         # GENERAL
@@ -533,7 +546,7 @@ class RGP(gp.GP):
         },
         # number of blamed structures to keep over time
         # if number is exceeded blames with less severity will be purged
-        'max_num_repulser': 50,
+        'max_num_repulser': 25,
         # OVERFITTING
         # number of individuals to keep in the best-of list on the
         # validation data
@@ -545,8 +558,11 @@ class RGP(gp.GP):
         #     (f2 - bf2) ** 2),  # squared difference of val fitness
         # this is from Vanneschi et al. (Measuring Bloat, Overfitting
         # and Functional Complexity in Genetic Programming):
+        # 'overfit_severity': lambda f1, f2, bf1, bf2: (
+        #     np.abs(f1 - f2) - np.abs(bf1 - bf2)),
+        # MSE of fitnesses
         'overfit_severity': lambda f1, f2, bf1, bf2: (
-            np.abs(f1 - f2) - np.abs(bf1 - bf2)),
+            np.sqrt(((f1 - bf1) ** 2 + (f2 - bf2) ** 2) / 2)),
         # determine the representative of the validation elite by avg/median
         'validation_elite_repr': 'avg'  # 'median' or 'avg'
     }
@@ -554,7 +570,7 @@ class RGP(gp.GP):
     r_general = {
         # blame full program for overfitting, or evaluate footprint and
         # determine important subprograms
-        'blame_full_program': False,
+        'blame_full_program': True,
         # how many subprograms are allowed to be identified as
         # the key programs of a full program
         'num_blames_per_individual': 5,
@@ -613,6 +629,10 @@ class RGP(gp.GP):
         self.name = "RGP"
         self.constants = constants
         self.num_features = num_features
+        self.overfitting_predictor = None
+        self.severity_predictor = None
+        self.o_s_predictor_order = 0
+        self.predict_overfitting = False
 
         Population.validation_elite = []
         Population.repulsers = []
@@ -633,7 +653,29 @@ class RGP(gp.GP):
         self.prepare_logging()
         self.log_config()
 
-    def evolve(self, X, Y, valX, valY, testX=None, testY=None, generations=25):
+    def use_predicted_overfitting(self, overfitting_model_path, severity_model_path, model_order,
+                                  group_depth):
+        with open(overfitting_model_path, 'r') as model:
+            self.overfitting_predictor = pickle.load(model)
+        with open(severity_model_path, 'r') as model:
+            self.severity_predictor = pickle.load(model)
+        self.o_s_predictor_order = model_order
+        self.o_s_predictor_group_depth = group_depth
+        self.predict_overfitting = True
+        _lmain.info("Using the following models instead of validation data:")
+        _lmain.info("- for overfitting: {0}".format(overfitting_model_path))
+        _lmain.info("- for severity: {0}".format(severity_model_path))
+        _lmain.info("- with order: {0}".format(model_order))
+        _lmain.info("- with group depth: {0}".format(group_depth))
+        if RGP.collect_accuracies:
+            _lmain.info("Collecting the accuracies of the predictions if validation data" + \
+                        " is provided.")
+        _lmain.info("-------------------------------------------------------")
+
+    def evolve(self, X, Y, valX=None, valY=None, testX=None, testY=None, generations=25):
+        if not self.predict_overfitting and valX is None and valY is None:
+            raise "Validation Data not provided and no models for predicting them either. Ensure" + \
+                    " to pass either the validation data or set the use_predicted_overfitting."
         # evaluate on training and validation
         self.population.evaluate(X, Y, valX, valY, testX, testY)
 
@@ -653,13 +695,12 @@ class RGP(gp.GP):
             # only the current best on training is a candidate
             # TODO only save the necessary data,
             # e.g train/val semantics & fitness
-            self.population.apply_for_validation_elite(
-                self.population.get_best('train'))
+            if not self.predict_overfitting or RGP.collect_accuracies:
+                self.population.apply_for_validation_elite(self.population.get_best('train'))
 
             # create new population
-            new_population = Population(
-                self.population.size, self, selection_type=self.sel_type,
-                tournament_size=RGP.tournament_size)
+            new_population = Population(self.population.size, self, selection_type=self.sel_type,
+                                        tournament_size=RGP.tournament_size)
 
             # copy the elite individual over to the next population
             # unless it's forbidden by configuration
@@ -717,9 +758,10 @@ class RGP(gp.GP):
             # determine fitness best individual
             best = self.population.get_best('train')
 
-            # if whished log footprint information 
+            # if whished log footprint information
             if RGP.collect_footprints[0] and g > RGP.collect_footprints[1]:
-                bf1, bf2 = self.population.get_val_elite_fitnesses()
+                if not self.predict_overfitting or RGP.collect_accuracies:
+                    bf1, bf2 = self.population.get_val_elite_fitnesses()
                 for i in self.population.get_best_n(RGP.collect_footprints[2]):
                     f1, f2 = i.get_fitness('train'), i.get_fitness('val')
                     fp = []
@@ -728,20 +770,59 @@ class RGP(gp.GP):
                     fp = np.asarray(fp).T
                     fp = np.append(fp, [[f1] for i in range(len(fp))], axis=1)
                     fp = np.append(fp, [[f2] for i in range(len(fp))], axis=1)
-                    fp = np.append(fp, [[bf1] for i in range(len(fp))], axis=1)
-                    fp = np.append(fp, [[bf2] for i in range(len(fp))], axis=1)
+                    if not self.predict_overfitting or RGP.collect_accuracies:
+                        fp = np.append(fp, [[bf1] for i in range(len(fp))], axis=1)
+                        fp = np.append(fp, [[bf2] for i in range(len(fp))], axis=1)
                     with open(RGP.footprints_path, 'ab') as log_file:
                         np.savetxt(log_file, fp, delimiter=";")
 
             # start testing for overfitting after n generations
             if g > RGP.gp_config['skip_generations']:
-                # determine if best is overfitting
+                # determine if best is overfitting | by validation data or model
                 f1, f2 = best.get_fitness('train'), best.get_fitness('val')
-                bf1, bf2 = self.population.get_val_elite_fitnesses()
-                if f2 > bf2:  # if best is worse on validation then val elite
+                if not self.predict_overfitting:
+                    bf1, bf2 = self.population.get_val_elite_fitnesses()
+                    is_overfitting = f2 > bf2
+                else:
+                    # predict overfitting if necessary
+                    is_overfitting = False
+                    # get complete footprint
+                    complete_fp = []
+                    for x in best.footprint['train']:
+                        complete_fp.append(x['Y'])
+                    complete_fp = np.asarray(complete_fp)  # shape: [program size, num observations]
+                    # ensure minimum program size is matched
+                    while complete_fp.shape[0] < self.o_s_predictor_order:
+                        complete_fp = np.concatenate([complete_fp, np.atleast_2d([0 for i in range(complete_fp.shape[1])])])
+                    # truncate to required program subset (discard front)
+                    complete_fp = complete_fp[-self.o_s_predictor_order:]
+                    # equalize observation count
+                    mechanism = RGP.validation_substitute['equalize_observation_count']
+                    if complete_fp.shape[1] > self.o_s_predictor_group_depth and mechanism == 'pca':
+                        complete_fp, evals, evecs = pca(complete_fp, self.o_s_predictor_group_depth)
+                        complete_fp = complete_fp.T
+                    elif complete_fp.shape[1] > self.o_s_predictor_group_depth and mechanism == 'sample':
+                        complete_fp = shuffle(complete_fp.T, n_samples=self.o_s_predictor_group_depth)
+                    # unstack
+                    feature_vector = np.hstack(complete_fp)
+                    # predict
+                    is_overfitting = self.overfitting_predictor.predict([feature_vector])[0] == 1
+
+                    if RGP.collect_accuracies:
+                        bf1, bf2 = self.population.get_val_elite_fitnesses()
+                        o_pred = 1 if is_overfitting else 0
+                        o_real = 1 if f2 > bf2 else 0
+                        s_pred = self.severity_predictor.predict([feature_vector])[0]
+                        s_real = (RGP.gp_config['overfit_severity'])(f1, f2, bf1, bf2)
+                        _laccuracies.debug('{0};{1};{2};{3}'.format(o_pred, o_real, s_pred, s_real))
+
+                if is_overfitting:  # if best is worse on validation then val elite
                     start_oe = _t()
-                    best.overfits_by = (RGP.gp_config
-                                        ['overfit_severity'])(f1, f2, bf1, bf2)
+                    if not self.predict_overfitting:
+                        best.overfits_by = (RGP.gp_config['overfit_severity'])(f1, f2, bf1, bf2)
+                    else:
+                        # use feature vector from before to predict severity
+                        best.overfits_by = self.severity_predictor.predict([feature_vector])[0]
 
                     _lmain.debug('Evaluating best individuals footprint')
                     evaluation = best.evaluate_footprint()
@@ -781,6 +862,9 @@ class RGP(gp.GP):
                 start_ou = _t()
                 # update individuals offensiveness
                 for i in self.population.individuals:
+                    if RGP.simulate_repulsing:
+                        i.offensiveness = 0
+                        continue
                     if RGP.repulse_by == 'syntax':
                         i.evaluate_syntactic_goodness()
                     elif RGP.repulse_by == 'semantics':
@@ -898,6 +982,8 @@ class RGP(gp.GP):
         _lmain.info('apply_depth_limit={0}'.format(RGP.apply_depth_limit))
         _lmain.info('depth_limit={0}'.format(RGP.depth_limit))
         _lmain.info('mutation_maximum_depth={0}'.format(RGP.mutation_maximum_depth))
+        _lmain.info('simulate_repulsing={0}'.format(RGP.simulate_repulsing))
+        _lmain.info('collect_accuracies={0}'.format(RGP.collect_accuracies))
 
         _lmain.info('repulse_by={0}'.format(RGP.repulse_by))
         _lmain.info('r_general: {0}'.format(RGP.r_general))
@@ -922,7 +1008,7 @@ class RGP(gp.GP):
         RGP.footprints_path = os.path.join(base, self.rid + '-footprints.txt')
         if RGP.collect_footprints[0]:
             with open(RGP.footprints_path, 'ab') as log_file:
-                log_file.write('footprint; last 4 columns: fitnesstrain, fitnessval, validation best fitnesstrain, validation best fitnessval\n')
+                log_file.write('footprint; last columns: fitnesstrain, fitnessval, [validation best fitnesstrain, validation best fitnessval]\n')
 
         # update loggers
         level = _l.INFO
@@ -934,6 +1020,9 @@ class RGP(gp.GP):
         reset_logger(logger_name='rgp.time')
         setup_logger(logger_name='rgp.time', log_file=os.path.join(base, self.rid + '-time.log'),
                      level=_l.DEBUG if RGP.timeit else _l.INFO)
+        reset_logger(logger_name='rgp.accuracies')
+        setup_logger(logger_name='rgp.accuracies', log_file=os.path.join(base, self.rid + '-accuracies.log'),
+                     level=_l.DEBUG if RGP.collect_accuracies else _l.INFO)
         reset_logger(logger_name='rgp.ftrain')
         setup_logger(logger_name='rgp.ftrain', log_file=os.path.join(base, self.rid + '-fitnesstrain.txt'),
                      level=level)
@@ -946,6 +1035,7 @@ class RGP(gp.GP):
 
         _lmain.info(self.name)
         _ltime.info(datetime.now())
+        _laccuracies.info('overfitting predicted;overfitting real;severity predicted; severity real')
         _lftest.info('Gen;Test Fitness')
         _lfval.info('Gen;Validation Fitness')
         _lftrain.info('Gen;Train Fitness;Size;Depth;Rank;Offensiveness;Number Repulsers')

@@ -289,12 +289,18 @@ class Individual(gp.Individual):
         else:
             raise 'Unknown similarity measure specified (options: RV, RV2 or DC)'
 
-        # parallel computation of similarities
+        n_comp = RGP.r_sema['n_components']
+        if n_comp is not None and fp.shape[1] > n_comp:
+            fp = fp[:, -n_comp:]
         partial_measure = partial(measure, fp)
         rep_data = []
         for r in Population.repulsers:
-            rep_data.append(r['str'][data_type])
+            d = np.asarray(r['str'][data_type])
+            if n_comp is not None and d.shape[1] > n_comp:
+                d = d[:, -n_comp:]
+            rep_data.append(d)
 
+        # computation of similarities either parallel or sequential
         if parallel:
             pool = Pool(nodes=num_cpus, initializer=init_worker)
             pool.ncpus = num_cpus
@@ -338,6 +344,9 @@ class Individual(gp.Individual):
 
 
 class Population(gp.Population):
+    __counters = {
+        'equality': 0
+    }
     validation_elite = []
     repulsers = []
 
@@ -422,7 +431,7 @@ class Population(gp.Population):
             i = i + 1
             F[i] = Q
         if RGP.log_stdout:
-            print 'Number of Fronts: {0}'.format(i - 1)
+            _lmain.info('Number of Fronts: {0}'.format(i - 1))
         assert count == len(P)  # ensure correctness of nsga-II
         _ltime.debug('3;nsga-II-sort;{0}'.format(_t() - start_t))
         return F
@@ -466,6 +475,7 @@ class Population(gp.Population):
         if len(best) == 1:
             return best[0]
         cfg = RGP.gp_config['mo_params']
+        Population.__counters['equality'] = Population.__counters['equality'] + 1
         if cfg['equality_escape'] == 'random':
             # return a random member of the best array
             return best[int(np.random.rand() * len(best))]
@@ -505,6 +515,14 @@ class Population(gp.Population):
             p['severity'] = p['severity'] / p['count']
             p.pop('count', None)
             p.pop('cp', None)
+
+    @staticmethod
+    def reset_counter(name):
+        Population.__counters[name] = 0
+
+    @staticmethod
+    def get_counter(name):
+        return Population.__counters.get(name, 0)
 
 
 class RGP(gp.GP):
@@ -615,7 +633,9 @@ class RGP(gp.GP):
         },
         # similarity measure to use when evaluating individuals semantic
         # goodness
-        'similarity_measure': 'RV'  # RV, RV2 or DC
+        # RV, RV2 or DC
+        'similarity_measure': 'RV',
+        'n_components': None  # number of components to truncate the matrixes to
     }
 
     # configuration for syntactic repulsing
@@ -706,6 +726,8 @@ class RGP(gp.GP):
                 crossover_count = 0
                 size_sum = 0
                 depth_sum = 0
+            # reset equality counter of population
+            Population.reset_counter('equality')
 
             # modify validation elite
             # only the current best on training is a candidate
@@ -876,6 +898,8 @@ class RGP(gp.GP):
             if len(Population.repulsers) > 0:
                 start_ou = _t()
                 # update individuals offensiveness
+                if RGP.simulate_repulsing:
+                    _lmain.info('skipping offensiveness calculation (simulated run)')
                 for i in self.population.individuals:
                     if RGP.simulate_repulsing:
                         i.offensiveness = 0
@@ -960,6 +984,8 @@ class RGP(gp.GP):
             self.population.get_val_elite_fitnesses()))
         _lmain.info('average offensiveness: {0}'.format(
             kwargs['avg_off']))
+        _lmain.info('tournament equality escapes: {0}'.format(
+            Population.get_counter('equality')))
         _lmain.info('-------------------------------------------')
         if kwargs['last']:
             _lmain.info('repulser list:\n{0}'.format(

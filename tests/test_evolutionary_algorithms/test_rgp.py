@@ -58,9 +58,12 @@ class TestRGP(unittest.TestCase):
         RGP.log_file_path = base + 'results/'
         RGP.log_stdout = True
         RGP.debug = False
-        RGP.timeit = False
+        RGP.timeit = True
         RGP.collect_footprints = (False, 10, 4)
         RGP.gp_config['skip_generations'] = 10
+        RGP.repulse_by = 'semantics'
+        RGP.gp_config['validation_elite_size'] = 5
+        RGP.r_general['blame_full_program'] = False
         rgp = RGP(num_features, constants, 200)
 
         _l.getLogger('rgp.main').info("Train_file = {0}".format(

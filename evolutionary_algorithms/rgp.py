@@ -20,6 +20,9 @@ from utilities.stats import rv_coefficient, rv2_coefficient, distance_correlatio
 from . import gp as gp
 from neural_networks.perceptrons.slp import SLP, f_softplus
 from sklearn.linear_model import LinearRegression
+from sklearn.feature_selection import RFE
+from sklearn.svm import SVR
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.utils import shuffle
 
 import logging as _l
@@ -132,10 +135,15 @@ class Individual(gp.Individual):
         # collect as much information as possible here
         super(Individual, self).evaluate(X, Y, testX, testY)
         # also run validation data
+        if self.tree.depth == np.Inf:
+            return
         if valX is not None and valY is not None:
-            self.__evaluate_X(valX, 'val')
-            self.last_error['val'] = np.sqrt(np.sum(
-                (self.last_semantics['val'] - valY)**2) / valX.shape[0])
+            if RGP.collect_footprints[0]:
+                self.__evaluate_all(valX, valY, 'val')
+            else:
+                self.__evaluate_X(valX, 'val')
+                self.last_error['val'] = np.sqrt(np.sum(
+                    (self.last_semantics['val'] - valY)**2) / valX.shape[0])
 
     def evaluate_footprint(self):
         """ Train an MLA on the footprint on a program to identify
@@ -157,6 +165,8 @@ class Individual(gp.Individual):
             weights = self.__class__.process_by_nn(raw)
         elif RGP.r_general['sub_prog_classifier'] == 'lr':
             weights = self.__class__.process_by_lr(raw)
+        elif RGP.r_general['sub_prog_classifier'] == 'svm':
+            weights = self.__class__.process_by_svm(raw)
         else:
             raise Exception('Unknown Sub Program Classifier')
         # determine most important subprogram based on weights
@@ -191,9 +201,21 @@ class Individual(gp.Individual):
 
     @staticmethod
     def process_by_lr(X):
+        scaled = MinMaxScaler().fit_transform(X)
         reg = LinearRegression(fit_intercept=RGP.lr_config['intercept'])
-        reg.fit(X[:, :-1], X[:, -1])
-        return reg.coef_ ** 2
+        #reg.fit(X[:, :-1], X[:, -1])
+        #return reg.coef_ ** 2
+        rfe = RFE(reg, 1)
+        rfe = rfe.fit(scaled[:, :-1], scaled[:, -1])
+        return 1 / np.asarray(rfe.ranking_).astype(float)
+
+    @staticmethod
+    def process_by_svm(X):
+        scaled = MinMaxScaler().fit_transform(X)
+        reg = SVR(kernel="linear")
+        rfe = RFE(reg, 1)
+        rfe = rfe.fit(scaled[:, :-1], scaled[:, -1])
+        return 1 / np.asarray(rfe.ranking_).astype(float)
 
     @staticmethod
     def process_by_nn(X):
@@ -430,8 +452,7 @@ class Population(gp.Population):
                         Q.append(q)
             i = i + 1
             F[i] = Q
-        if RGP.log_stdout:
-            _lmain.info('Number of Fronts: {0}'.format(i - 1))
+        _lmain.info('Number of Fronts: {0}'.format(i - 1))
         assert count == len(P)  # ensure correctness of nsga-II
         _ltime.debug('3;nsga-II-sort;{0}'.format(_t() - start_t))
         return F
@@ -596,7 +617,7 @@ class RGP(gp.GP):
         #     np.abs(f1 - f2) - np.abs(bf1 - bf2)),
         # MSE of fitnesses
         'overfit_severity': lambda f1, f2, bf1, bf2: (
-            np.sqrt(((f1 - bf1) ** 2 + (f2 - bf2) ** 2) / 2)),
+            np.sqrt(((f1 - bf1) ** 2 + (f2 - bf2) ** 2)) / 2),
         # determine the representative of the validation elite by avg/median
         'validation_elite_repr': 'avg'  # 'median' or 'avg'
     }
@@ -618,7 +639,7 @@ class RGP(gp.GP):
         'max_program_size': 0.7,
         # classifier to use when determining importance of sub programs
         # see their own configuration for further adaptions
-        'sub_prog_classifier': 'lr',  # lr: linear regression, nn: neural ntwrk
+        'sub_prog_classifier': 'svm',  # lr: linear regression, nn: neural ntwrk, svm: svm
     }
 
     # configurations for semantic repulsing
@@ -667,8 +688,10 @@ class RGP(gp.GP):
         self.num_features = num_features
         self.overfitting_predictor = None
         self.severity_predictor = None
+        self.bucket_predictor = None
         self.o_s_predictor_order = 0
         self.predict_overfitting = False
+        self.use_bucket_predictor = False
 
         Population.validation_elite = []
         Population.repulsers = []
@@ -689,18 +712,27 @@ class RGP(gp.GP):
         self.prepare_logging()
         self.log_config()
 
-    def use_predicted_overfitting(self, overfitting_model_path, severity_model_path, model_order,
-                                  group_depth):
-        with open(overfitting_model_path, 'r') as model:
-            self.overfitting_predictor = pickle.load(model)
-        with open(severity_model_path, 'r') as model:
-            self.severity_predictor = pickle.load(model)
+    def use_predicted_overfitting(self, overfitting_model_path=None, severity_model_path=None,
+                                  bucket_model_path=None, model_order=0, group_depth=0):
+        if bucket_model_path is None:
+            with open(overfitting_model_path, 'r') as model:
+                self.overfitting_predictor = pickle.load(model)
+            with open(severity_model_path, 'r') as model:
+                self.severity_predictor = pickle.load(model)
+        else:
+            with open(bucket_model_path, 'r') as model:
+                self.bucket_predictor = pickle.load(model)
+            self.use_bucket_predictor = True
+
         self.o_s_predictor_order = model_order
         self.o_s_predictor_group_depth = group_depth
         self.predict_overfitting = True
         _lmain.info("Using the following models instead of validation data:")
-        _lmain.info("- for overfitting: {0}".format(overfitting_model_path))
-        _lmain.info("- for severity: {0}".format(severity_model_path))
+        if bucket_model_path is None:
+            _lmain.info("- for overfitting: {0}".format(overfitting_model_path))
+            _lmain.info("- for severity: {0}".format(severity_model_path))
+        else:
+            _lmain.info("- for bucket: {0}".format(bucket_model_path))
         _lmain.info("- with order: {0}".format(model_order))
         _lmain.info("- with group depth: {0}".format(group_depth))
         if RGP.collect_accuracies:
@@ -805,6 +837,11 @@ class RGP(gp.GP):
                     for x in i.footprint['train']:
                         fp.append(x['Y'])
                     fp = np.asarray(fp).T
+                    fp_val = []
+                    for x in i.footprint['val']:
+                        fp_val.append(x['Y'])
+                    fp_val = np.asarray(fp_val).T
+                    fp = np.concatenate((fp, fp_val))
                     fp = np.append(fp, [[f1] for i in range(len(fp))], axis=1)
                     fp = np.append(fp, [[f2] for i in range(len(fp))], axis=1)
                     if not self.predict_overfitting or RGP.collect_accuracies:
@@ -831,27 +868,43 @@ class RGP(gp.GP):
                     # ensure minimum program size is matched
                     while complete_fp.shape[0] < self.o_s_predictor_order:
                         complete_fp = np.concatenate([complete_fp, np.atleast_2d([0 for i in range(complete_fp.shape[1])])])
-                    # truncate to required program subset (discard front)
-                    complete_fp = complete_fp[-self.o_s_predictor_order:]
-                    # equalize observation count
-                    mechanism = RGP.validation_substitute['equalize_observation_count']
-                    if complete_fp.shape[1] > self.o_s_predictor_group_depth and mechanism == 'pca':
-                        complete_fp, evals, evecs = pca(complete_fp, self.o_s_predictor_group_depth)
-                        complete_fp = complete_fp.T
-                    elif complete_fp.shape[1] > self.o_s_predictor_group_depth and mechanism == 'sample':
-                        complete_fp = shuffle(complete_fp.T, n_samples=self.o_s_predictor_group_depth)
+                    # truncate to required program subset by linear regression
+                    complete_fp = complete_fp.T
+                    weights = Individual.process_by_svm(complete_fp.copy())
+                    # reg = LinearRegression(fit_intercept=True)
+                    # scaled = MinMaxScaler().fit_transform(complete_fp.copy())
+                    # reg.fit(scaled[:, :-1], scaled[:, -1])
+                    # weights = reg.coef_ ** 2
+                    args_sorted = np.array(weights).argsort()[::-1][:self.o_s_predictor_order]
+                    complete_fp = np.c_[complete_fp[:, args_sorted], complete_fp[:, -1]]
+                    # rfe = RFE(reg, self.o_s_predictor_order)
+                    # rfe = rfe.fit(scaled[:, :-1], scaled[:, -1])
+                    # mask = np.asarray(rfe.ranking_) == 1
+                    # mask = np.concatenate([mask, [True]])  # add last column to be put into truncated footprint
+                    # complete_fp = complete_fp[:, mask]
                     # unstack
                     feature_vector = np.hstack(complete_fp)
                     # predict
-                    is_overfitting = self.overfitting_predictor.predict([feature_vector])[0] == 1
+                    try:
+                        if self.use_bucket_predictor:
+                            is_overfitting = self.bucket_predictor.predict([feature_vector])[0] != 0
+                        else:
+                            is_overfitting = self.overfitting_predictor.predict([feature_vector])[0] == 1
+                        if RGP.collect_accuracies:
+                            bf1, bf2 = self.population.get_val_elite_fitnesses()
+                            o_pred = 1 if is_overfitting else 0
+                            o_real = 1 if f2 > bf2 else 0
+                            if self.use_bucket_predictor:
+                                s_pred = self.bucket_predictor.predict([feature_vector])[0]
+                            else:
+                                s_pred = self.severity_predictor.predict([feature_vector])[0]
+                            s_real = (RGP.gp_config['overfit_severity'])(f1, f2, bf1, bf2)
+                            _laccuracies.debug('{0};{1};{2};{3}'.format(o_pred, o_real, s_pred, s_real))
+                    except Exception as e:
+                        _lmain.info('failed to predict overfitting')
+                        _lmain.error(e)
+                        is_overfitting = False
 
-                    if RGP.collect_accuracies:
-                        bf1, bf2 = self.population.get_val_elite_fitnesses()
-                        o_pred = 1 if is_overfitting else 0
-                        o_real = 1 if f2 > bf2 else 0
-                        s_pred = self.severity_predictor.predict([feature_vector])[0]
-                        s_real = (RGP.gp_config['overfit_severity'])(f1, f2, bf1, bf2)
-                        _laccuracies.debug('{0};{1};{2};{3}'.format(o_pred, o_real, s_pred, s_real))
 
                 if is_overfitting:  # if best is worse on validation then val elite
                     start_oe = _t()
@@ -859,7 +912,10 @@ class RGP(gp.GP):
                         best.overfits_by = (RGP.gp_config['overfit_severity'])(f1, f2, bf1, bf2)
                     else:
                         # use feature vector from before to predict severity
-                        best.overfits_by = self.severity_predictor.predict([feature_vector])[0]
+                        if self.use_bucket_predictor:
+                            best.overfits_by = self.bucket_predictor.predict([feature_vector])[0]
+                        else:
+                            best.overfits_by = self.severity_predictor.predict([feature_vector])[0]
 
                     _lmain.debug('Evaluating best individuals footprint')
                     evaluation = best.evaluate_footprint()
